@@ -17,3 +17,11 @@ Use
 ====
 
 `.\target\release\twitchlink --channel monstercat`
+
+
+```
+OPTIONS:
+    -c, --channel <channel>    Twitch channel url
+    -f, --file <file>          File path or 'out' for stdout, 'ffplay' for player window
+    -p, --playlist <m3u8>      Playlist url, overwrites twitch m3u8 resolver
+```
