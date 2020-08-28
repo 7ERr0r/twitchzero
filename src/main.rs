@@ -337,7 +337,7 @@ async fn ensure_ffplay(client: &reqwest::Client) -> Result<(), anyhow::Error> {
             if attr.is_file() {
                 return Ok(());
             }
-            return Err(TwitchlowError::FileIsNotFFplay.into());
+            return Err(TwitchlinkError::FileIsNotFFplay.into());
         }
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
@@ -537,8 +537,8 @@ async fn recv_timeout<T>(
 }
 
 #[derive(Debug, derive_more::Display)]
-pub enum TwitchlowError {
+pub enum TwitchlinkError {
     #[display(fmt = "file ffplay.exe is not a file")]
     FileIsNotFFplay,
 }
-impl std::error::Error for TwitchlowError {}
+impl std::error::Error for TwitchlinkError {}
