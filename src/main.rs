@@ -8,7 +8,6 @@ use std::rc::Rc;
 
 use std::collections::HashMap;
 
-//use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncWrite;
 use tokio::io::{self, AsyncWriteExt};
@@ -23,8 +22,6 @@ struct TokenSig {
     token: String,
     sig: String,
 }
-
-//use tokio::sync::Mutex;
 
 macro_rules! aerr {
     () => (io::stderr().write_all(&[0; 0]).await);
@@ -48,13 +45,12 @@ fn extract_segments(text: &str) -> Vec<&str> {
     v
 }
 
-//type WriteRef = Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>;
 type OutBufRef = Sender<Vec<u8>>;
 
 async fn fetch_segment(
     client: reqwest::Client,
     prefetch_url: String,
-    mut out: OutBufRef,
+    mut outs: Vec<OutBufRef>,
     mut rxprevdone: Receiver<bool>,
 ) -> Result<(), anyhow::Error> {
     for _i in 0..2 {
@@ -74,11 +70,10 @@ async fn fetch_segment(
 
             while let Some(chunk) = res.chunk().await? {
                 //use tokio::prelude::*;
-                //w.write_all(&chunk).await?;
-                out.send((&chunk).to_vec()).await?;
-
+                for out in outs.iter_mut() {
+                    out.send((&chunk).to_vec()).await?;
+                }
                 aerr!(".")?;
-                //println!("Chunk: {:?}", chunk);
             }
             break;
         }
@@ -91,7 +86,7 @@ async fn reload_m3u8(
     used_segments: &mut HashMap<String, bool>,
     client: reqwest::Client,
     m3u8_url: String,
-    out: OutBufRef,
+    out: &mut Vec<OutBufRef>,
     txdone: Sender<bool>,
     chain: &mut ChainSync,
 ) -> Result<(), anyhow::Error> {
@@ -100,9 +95,6 @@ async fn reload_m3u8(
     aerr!("reload_m3u8: Status: {}\n", res.status())?;
 
     let text = res.text().await?;
-
-    //let max_in_flight = 100;
-    //
 
     let segments_vec = extract_segments(&text);
     let mut segments = segments_vec.as_slice();
@@ -198,7 +190,7 @@ impl ChainSync {
 
 async fn copy_channel_to_out(
     mut rxbuf: Receiver<Vec<u8>>,
-    mut out: Box<dyn AsyncWrite + Unpin>,
+    out: &mut Box<dyn AsyncWrite + Unpin>,
 ) -> Result<(), anyhow::Error> {
     loop {
         let out_bytes_vec = rxbuf.recv().await;
@@ -218,7 +210,7 @@ async fn copy_channel_to_out(
 async fn reload_loop(
     client: reqwest::Client,
     m3u8playlist_url: String,
-    txbuf: Sender<Vec<u8>>,
+    txbufs: &mut Vec<Sender<Vec<u8>>>,
     copy_ended: Rc<RefCell<bool>>,
 ) -> Result<(), anyhow::Error> {
     let (txdone, mut rxdone) = mpsc::channel::<bool>(10);
@@ -233,7 +225,7 @@ async fn reload_loop(
             &mut used_segments,
             client.clone(),
             m3u8playlist_url.clone(),
-            txbuf.clone(),
+            txbufs,
             txdone.clone(),
             &mut chain,
         )
@@ -266,7 +258,8 @@ async fn fetch_m3u8_by_channel(
         channel
     );
     let token_sig = {
-        let url = reqwest::Url::parse(&access_token_addr)?;
+        let params = [("platform", "_")];
+        let url = reqwest::Url::parse_with_params(&access_token_addr, &params)?;
         let mut req = reqwest::Request::new(reqwest::Method::GET, url);
         let h = req.headers_mut();
         h.insert(ACCEPT, "application/vnd.twitchtv.v3+json".parse().unwrap());
@@ -387,6 +380,79 @@ async fn ensure_ffplay(client: &reqwest::Client) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+fn spawn_ffplay(
+    copy_ended: &Rc<RefCell<bool>>,
+    channel: &str,
+    onlyaudio: bool,
+) -> tokio::process::ChildStdin {
+    use std::process::Stdio;
+    use tokio::process::Command;
+
+    let mut cmd = Box::new(Command::new(".\\ffplay"));
+
+    // audio
+    // ffplay -window_title "%channel%" -fflags nobuffer -flags low_delay -af volume=0.2 -x 1280 -y 720 -i -
+
+    // video
+    // ffplay -window_title "%channel%" -probesize 32 -sync ext -af volume=0.3 -vf setpts=0.5*PTS -x 1280 -y 720 -i -
+
+    if onlyaudio {
+        cmd.arg("-window_title").arg(format!("{} audio", channel));
+        cmd.arg("-fflags")
+            .arg("nobuffer")
+            .arg("-flags")
+            .arg("low_delay")
+            .arg("-vn")
+            .arg("-af")
+            .arg("volume=0.4")
+            .arg("-framedrop")
+            .arg("-vf")
+            .arg("setpts=0.5*PTS")
+            .arg("-strict")
+            .arg("experimental")
+            .arg("-x")
+            .arg("1280")
+            .arg("-y")
+            .arg("720")
+            .arg("-i")
+            .arg("-");
+    } else {
+        cmd.arg("-window_title")
+            .arg(format!("{} lowest latency", channel));
+        cmd.arg("-probesize")
+            .arg("32")
+            .arg("-sync")
+            .arg("ext")
+            .arg("-vf")
+            .arg("setpts=0.5*PTS")
+            .arg("-x")
+            .arg("1280")
+            .arg("-y")
+            .arg("720")
+            .arg("-i")
+            .arg("-");
+    }
+
+    cmd.stderr(Stdio::null()).stdin(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("failed to spawn ffplay");
+
+    let stdin = child
+        .stdin
+        .take()
+        .expect("child did not have a handle to stdin");
+
+    let process_ended = copy_ended.clone();
+    tokio::task::spawn_local(async move {
+        let status = child.await.expect("child process encountered an error");
+
+        let _ = aerr!("child status was: {}", status);
+        *process_ended.borrow_mut() = true;
+    });
+
+    stdin
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     use clap::{App, Arg};
@@ -395,10 +461,13 @@ async fn main() -> Result<(), anyhow::Error> {
         .author("Szperak")
         .about("Lowest possible m3u8 latency, acquires playlist url, async segment fetching")
         .arg(
-            Arg::with_name("file")
-                .short("f")
-                .long("file")
+            Arg::with_name("out")
+
+                .short("O")
+                .long("out")
                 .takes_value(true)
+                .multiple(true)
+                .min_values(1)
                 .help("File path or 'out' for stdout, 'ffplay' for player window"),
         )
         .arg(
@@ -417,17 +486,20 @@ async fn main() -> Result<(), anyhow::Error> {
         )
         .get_matches();
 
-    let filepath = matches.value_of("file").unwrap_or("ffplay");
+    let def = vec!["ffplay"];
+    let mut out_names: Vec<&str> = matches
+        .values_of("out")
+        .map(|v| v.collect::<Vec<_>>())
+        .unwrap_or(def);
+
     let mut m3u8playlist_url = matches.value_of("m3u8").unwrap_or("null").to_string();
-    let channel = matches
-        .value_of("channel")
-        .unwrap_or("georgehotz");
+    let channel = matches.value_of("channel").unwrap_or("georgehotz");
 
     let client = reqwest::Client::builder()
         .build()
         .expect("should be able to build reqwest client");
 
-    if filepath == "ffplay" {
+    if out_names.contains(&"ffplay") {
         ensure_ffplay(&client).await?;
     }
 
@@ -441,72 +513,56 @@ async fn main() -> Result<(), anyhow::Error> {
     local
         .run_until(async move {
             let copy_ended = Rc::new(RefCell::new(false));
-            let copy_endedc = copy_ended.clone();
-            let out: Box<dyn AsyncWrite + Unpin>;
+            let mut outs: Vec<Box<dyn AsyncWrite + Unpin>> = Vec::new();
 
-            if filepath == "ffplay" {
-                // ffplay -window_title "%channel%" -probesize 32 -sync ext -af volume=0.3 -vf setpts=0.5*PTS -x 1280 -y 720 -i -
-
-                use std::process::Stdio;
-                use tokio::process::Command;
-
-                let mut cmd = Box::new(Command::new(".\\ffplay"));
-
-                cmd.arg("-window_title")
-                    .arg(format!("{} lowest latency", channel))
-                    .arg("-probesize")
-                    .arg("32")
-                    .arg("-sync")
-                    .arg("ext")
-                    .arg("-vf")
-                    .arg("setpts=0.5*PTS")
-                    .arg("-x")
-                    .arg("1280")
-                    .arg("-y")
-                    .arg("720")
-                    .arg("-i")
-                    .arg("-")
-                    .stderr(Stdio::null())
-                    .stdin(Stdio::piped());
-
-                let mut child = cmd.spawn().expect("failed to spawn command");
-
-                let stdin = child
-                    .stdin
-                    .take()
-                    .expect("child did not have a handle to stdin");
-
-                let process_ended = copy_ended.clone();
-                tokio::task::spawn_local(async move {
-                    let status = child.await.expect("child process encountered an error");
-
-                    let _ = aerr!("child status was: {}", status);
-                    *process_ended.borrow_mut() = true;
-                });
-
-                out = Box::new(stdin);
-            } else if filepath == "out" {
-                out = Box::new(io::stdout());
-            } else {
-                out = Box::new(File::create(filepath).await.unwrap());
+            while let Some(out_name) = out_names.pop() {
+                match out_name {
+                    "ffplay" => {
+                        out_names.push("video");
+                        out_names.push("audio");
+                    },
+                    "video" => {
+                        let stdin_video = spawn_ffplay(&copy_ended, channel, false);
+                        outs.push(Box::new(stdin_video));
+                    }
+                    "audio" => {
+                        let stdin_audio = spawn_ffplay(&copy_ended, channel, true);
+                        outs.push(Box::new(stdin_audio));
+                    }
+                    "out" => {
+                        outs.push(Box::new(io::stdout()));
+                    }
+                    "stdout" => {
+                        outs.push(Box::new(io::stdout()));
+                    }
+                    default_filepath => {
+                        outs.push(Box::new(File::create(default_filepath).await.unwrap()));
+                    }
+                }
             }
 
-            let (txbuf, rxbuf) = mpsc::channel::<Vec<u8>>(1024 * 16);
 
-            tokio::task::spawn_local(async move {
-                let res = copy_channel_to_out(rxbuf, out).await;
-                match res {
-                    Err(err) => {
-                        let _ = aerr!("copy_channel_to_out err: {}\n", err);
+            let mut txbufs = Vec::new();
+            for mut out in outs {
+                let (txbuf, rxbuf) = mpsc::channel::<Vec<u8>>(1024 * 8);
+                let copy_endedc = copy_ended.clone();
+
+                txbufs.push(txbuf);
+                tokio::task::spawn_local(async move {
+                    let res = copy_channel_to_out(rxbuf, &mut out).await;
+                    match res {
+                        Err(err) => {
+                            let _ = aerr!("copy_channel_to_out err: {}\n", err);
+                        }
+                        Ok(_) => {}
                     }
-                    Ok(_) => {}
-                }
-                let _ = aerr!("copy_channel_to_out ending\n");
-                *copy_endedc.borrow_mut() = true;
-            });
+                    let _ = aerr!("copy_channel_to_out ending\n");
+                    *copy_endedc.borrow_mut() = true;
+                });
+            }
 
             tokio::task::spawn_local(async move {
-                reload_loop(client, m3u8playlist_url, txbuf, copy_ended)
+                reload_loop(client, m3u8playlist_url, &mut txbufs, copy_ended)
                     .await
                     .unwrap();
             })
