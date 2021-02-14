@@ -1,4 +1,4 @@
-# twitchlink
+# twitchzero
 Lowest possible latency on twitch with ffplay
 
 Similar to streamlink, but without bugs and slow+heavy python. 
