@@ -1,4 +1,7 @@
+use reqwest::header::HeaderMap;
 use reqwest::header::ACCEPT;
+use reqwest::header::ORIGIN;
+use reqwest::header::REFERER;
 use tokio::sync::mpsc::error::SendError;
 
 use futures::future::FutureExt;
@@ -23,7 +26,7 @@ struct TokenSig {
     sig: String,
 }
 
-macro_rules! aerr {
+macro_rules! stderr {
     () => (io::stderr().write_all(&[0; 0]).await);
     ($($arg:tt)*) => ({
         io::stderr().write_all(&std::format!($($arg)*).as_bytes()).await
@@ -45,12 +48,12 @@ fn extract_segments(text: &str) -> Vec<&str> {
     v
 }
 
-type OutBufRef = Sender<Vec<u8>>;
+type OutBufRef = Sender<Rc<Vec<u8>>>;
 
 async fn fetch_segment(
     client: reqwest::Client,
     prefetch_url: String,
-    mut outs: Vec<OutBufRef>,
+    outs: &mut Vec<OutBufRef>,
     mut rxprevdone: Receiver<bool>,
 ) -> Result<(), anyhow::Error> {
     for _i in 0..2 {
@@ -59,21 +62,22 @@ async fn fetch_segment(
             let last_segment_timeout = std::time::Duration::from_millis(2000);
             match recv_timeout(&mut rxprevdone, last_segment_timeout).await {
                 Err(_) => {
-                    aerr!("\nsegment: last one timed out\n")?;
+                    stderr!("\nsegment: last one timed out\n")?;
                 }
                 Ok(_) => {
-                    aerr!("\nsegment: last one done\n")?;
+                    stderr!("\nsegment: last one done\n")?;
                 }
             }
-            //let mut w = (*out).lock().await;
-            // locks the whole segment i/o
 
             while let Some(chunk) = res.chunk().await? {
                 //use tokio::prelude::*;
+                let vec_rc = Rc::new((&chunk).to_vec());
                 for out in outs.iter_mut() {
-                    out.send((&chunk).to_vec()).await?;
+                    let result = out.try_send(vec_rc.clone());
+                    // ignore, channel overflow
+                    drop(result);
                 }
-                aerr!(".")?;
+                stderr!(".")?;
             }
             break;
         }
@@ -83,16 +87,17 @@ async fn fetch_segment(
 }
 
 async fn reload_m3u8(
-    used_segments: &mut HashMap<String, bool>,
+    used_segments: &mut HashMap<String, u64>,
     client: reqwest::Client,
     m3u8_url: String,
     out: &mut Vec<OutBufRef>,
     txdone: Sender<bool>,
     chain: &mut ChainSync,
+    epoch_number: u64,
 ) -> Result<(), anyhow::Error> {
     let res = client.get(&m3u8_url).send().await?;
 
-    aerr!("reload_m3u8: Status: {}\n", res.status())?;
+    stderr!("reload_m3u8: Status: {}\n", res.status())?;
 
     let text = res.text().await?;
 
@@ -108,21 +113,21 @@ async fn reload_m3u8(
     for segment_url in segments {
         let furl = segment_url.to_string();
         if !used_segments.contains_key(&furl) {
-            used_segments.insert(furl.to_string(), true);
+            used_segments.insert(furl.to_string(), epoch_number);
 
-            aerr!("reload_m3u8: 1 new segment\n")?;
+            stderr!("reload_m3u8: 1 new segment\n")?;
             let cclient = client.clone();
-            let cout = out.clone();
-            let mut ctxdone = txdone.clone();
+            let mut cout = out.clone();
+            let ctxdone = txdone.clone();
 
             let crxprevdone = chain.grab_receiver();
             chain.reset();
-            let mut ctxprevdone = chain.txprevdone.clone();
-            tokio::spawn(async move {
-                let res = fetch_segment(cclient, furl, cout, crxprevdone).await;
+            let ctxprevdone = chain.txprevdone.clone();
+            tokio::task::spawn_local(async move {
+                let res = fetch_segment(cclient, furl, &mut cout, crxprevdone).await;
                 match res {
                     Err(err) => {
-                        let _ = aerr!("fetch_segment err: {}", err);
+                        let _ = stderr!("fetch_segment err: {}", err);
                     }
                     _ => {}
                 }
@@ -133,7 +138,7 @@ async fn reload_m3u8(
         //let sleep_duration = std::time::Duration::from_millis(10);
         //tokio::time::delay_for(sleep_duration).await;
         } else {
-            aerr!("reload_m3u8: duplicate segment, not fetching\n")?;
+            stderr!("reload_m3u8: duplicate segment, not fetching\n")?;
             dup_count += 1;
         }
     }
@@ -141,7 +146,7 @@ async fn reload_m3u8(
     if false {
         if dup_count == num_segments {
             let h = sha3(&text);
-            let _ = aerr!("creating: {}.m3u8\n", h);
+            let _ = stderr!("creating: {}.m3u8\n", h);
             let mut file = File::create(format!("m3u8/{}.m3u8", h)).await?;
             file.write_all(&text.as_bytes()).await?;
         }
@@ -165,7 +170,7 @@ struct ChainSync {
 
 impl ChainSync {
     async fn new() -> Result<Self, SendError<bool>> {
-        let (mut txprevdone, rxprevdone) = mpsc::channel::<bool>(1);
+        let (txprevdone, rxprevdone) = mpsc::channel::<bool>(1);
         // init chain of prev-next segment sync
         txprevdone.send(true).await?;
         Ok(ChainSync {
@@ -189,14 +194,14 @@ impl ChainSync {
 }
 
 async fn copy_channel_to_out(
-    mut rxbuf: Receiver<Vec<u8>>,
+    mut rxbuf: Receiver<Rc<Vec<u8>>>,
     out: &mut Box<dyn AsyncWrite + Unpin>,
 ) -> Result<(), anyhow::Error> {
     loop {
         let out_bytes_vec = rxbuf.recv().await;
         match out_bytes_vec {
             Some(bytes_vec) => {
-                //aerr!("+")?;
+                //stderr!("+")?;
                 out.write_all(&bytes_vec).await?;
             }
             None => {
@@ -207,18 +212,31 @@ async fn copy_channel_to_out(
     Ok(())
 }
 
+fn clear_timeout_hashmap(used_segments: &mut HashMap<String, u64>, reloads: u64) {
+    // clear hashmap sometimes, after n reloads
+    let n = 16;
+    if reloads > n && reloads & 7 == 0 {
+        let min_epoch = reloads - n;
+
+        used_segments.retain(|_key, value| *value >= min_epoch);
+    }
+}
+
 async fn reload_loop(
     client: reqwest::Client,
     m3u8playlist_url: String,
-    txbufs: &mut Vec<Sender<Vec<u8>>>,
+    txbufs: &mut Vec<OutBufRef>,
     copy_ended: Rc<RefCell<bool>>,
 ) -> Result<(), anyhow::Error> {
     let (txdone, mut rxdone) = mpsc::channel::<bool>(10);
 
     let mut chain = ChainSync::new().await?;
 
-    let mut used_segments: HashMap<String, bool> = HashMap::new();
+    let mut used_segments: HashMap<String, u64> = HashMap::new();
+
     let sleep_duration = std::time::Duration::from_millis(2000);
+
+    let mut reloads: u64 = 0;
 
     while !*copy_ended.borrow() {
         let reload_result = reload_m3u8(
@@ -228,31 +246,36 @@ async fn reload_loop(
             txbufs,
             txdone.clone(),
             &mut chain,
+            reloads,
         )
         .await;
+        reloads += 1;
+
         match reload_result {
             Err(reload_err) => {
-                aerr!("reload_err: {}\n", reload_err)?;
+                stderr!("reload_err: {}\n", reload_err)?;
             }
             Ok(_) => {}
         }
 
+        clear_timeout_hashmap(&mut used_segments, reloads);
+
         match recv_timeout(&mut rxdone, sleep_duration).await {
             Err(_) => {
-                aerr!("\nmain: sleep ready\n")?;
+                stderr!("\nmain: sleep ready\n")?;
             }
             Ok(_) => {
-                aerr!("\nmain: done channel ready\n")?;
+                stderr!("\nmain: done channel ready\n")?;
             }
         }
     }
     Ok(())
 }
 
-async fn fetch_m3u8_by_channel(
+async fn fetch_access_token_old(
     client: &reqwest::Client,
-    channel: String,
-) -> Result<String, anyhow::Error> {
+    channel: &String,
+) -> Result<TokenSig, anyhow::Error> {
     let access_token_addr = format!(
         "https://api.twitch.tv/api/channels/{}/access_token",
         channel
@@ -267,16 +290,101 @@ async fn fetch_m3u8_by_channel(
             "Client-ID",
             "kimne78kx3ncx6brgo4mv6wki5h1ko".parse().unwrap(),
         );
+        h.insert(REFERER, "https://player.twitch.tv".parse().unwrap());
+        h.insert(ORIGIN, "https://player.twitch.tv".parse().unwrap());
 
         let res = client.execute(req).await?;
-        aerr!("access_token: Status: {}\n", res.status())?;
+        stderr!("access_token: Status: {}\n", res.status())?;
 
         let bytes_vec = res.bytes().await?;
-        aerr!("access_token: {}\n", String::from_utf8_lossy(&bytes_vec))?;
+        stderr!("access_token: {}\n", String::from_utf8_lossy(&bytes_vec))?;
 
         let token_sig: TokenSig = serde_json::from_slice(&bytes_vec)?;
         token_sig
     };
+    Ok(token_sig)
+}
+
+#[derive(Serialize, Deserialize)]
+struct GQLTokenSignature {
+    value: String,
+    signature: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GQLTokenResponseData {
+    streamPlaybackAccessToken: GQLTokenSignature,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GQLTokenResponse {
+    data: GQLTokenResponseData,
+}
+async fn fetch_access_token_gql(
+    client: &reqwest::Client,
+    channel: &String,
+) -> Result<TokenSig, anyhow::Error> {
+    let access_token_addr = format!("https://gql.twitch.tv/gql");
+    let token_sig = {
+        let params = [("platform", "_")];
+        let url = reqwest::Url::parse_with_params(&access_token_addr, &params)?;
+
+        let is_live = true;
+        let login = if is_live { channel } else { "" };
+        let vod_id = if is_live { "" } else { "" };
+        let json_map = serde_json::json!({
+            "operationName": "PlaybackAccessToken",
+            "extensions": {
+                "persistedQuery": {
+                    "version": 1,
+                    "sha256Hash": "0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712"
+                }
+            },
+            "variables": {
+                "isLive": is_live,
+                "login": login,
+                "isVod": !is_live,
+                "vodID": vod_id,
+                "playerType": "embed"
+            }
+        });
+
+        let mut h = HeaderMap::new();
+        h.insert(
+            "Client-ID",
+            "kimne78kx3ncx6brgo4mv6wki5h1ko".parse().unwrap(),
+        );
+        h.insert(ACCEPT, "application/vnd.twitchtv.v3+json".parse().unwrap());
+        h.insert(REFERER, "https://player.twitch.tv".parse().unwrap());
+        h.insert(ORIGIN, "https://player.twitch.tv".parse().unwrap());
+
+        let res = client.post(url).json(&json_map).headers(h).send().await?;
+
+        stderr!("fetch_access_token_gql: Status: {}\n", res.status())?;
+
+        let bytes_vec = res.bytes().await?;
+        stderr!(
+            "fetch_access_token_gql: {}\n",
+            String::from_utf8_lossy(&bytes_vec)
+        )?;
+
+        let gql_resp: GQLTokenResponse = serde_json::from_slice(&bytes_vec)?;
+
+        let token_sig = TokenSig {
+            token: gql_resp.data.streamPlaybackAccessToken.value,
+            sig: gql_resp.data.streamPlaybackAccessToken.signature,
+        };
+        token_sig
+    };
+    Ok(token_sig)
+}
+
+async fn fetch_m3u8_by_channel(
+    client: &reqwest::Client,
+    channel: String,
+) -> Result<String, anyhow::Error> {
+    //let token_sig = fetch_access_token_old(client, &channel).await?;
+    let token_sig = fetch_access_token_gql(client, &channel).await?;
 
     let channel_addr = format!("https://usher.ttvnw.net/api/channel/hls/{}.m3u8", channel);
     let playlist_url = {
@@ -298,20 +406,28 @@ async fn fetch_m3u8_by_channel(
             q.append_pair("token", &token_sig.token);
             q.append_pair("fast_bread", "true");
         }
-        aerr!("channel url: {}\n", url)?;
-        let req = reqwest::Request::new(reqwest::Method::GET, url);
+        stderr!("channel url: {}\n", url)?;
+        let mut req = reqwest::Request::new(reqwest::Method::GET, url);
+        let h = req.headers_mut();
+        h.insert(
+            "Client-ID",
+            "kimne78kx3ncx6brgo4mv6wki5h1ko".parse().unwrap(),
+        );
+        h.insert(REFERER, "https://player.twitch.tv".parse().unwrap());
+        h.insert(ORIGIN, "https://player.twitch.tv".parse().unwrap());
+
         let res = client.execute(req).await?;
-        aerr!("channel: Status: {}\n", res.status())?;
+        stderr!("channel: Status: {}\n", res.status())?;
 
         let text = res.text().await?;
         if false {
             let h = sha3(&text);
-            let _ = aerr!("creating: {}.m3u8\n", h);
+            let _ = stderr!("creating: {}.m3u8\n", h);
             let mut file = File::create(format!("m3u8/{}.m3u8", h)).await?;
             file.write_all(&text.as_bytes()).await?;
         }
 
-        aerr!("channel: {}\n", &text)?;
+        stderr!("channel: {}\n", &text)?;
 
         let segments_vec = extract_segments(&text);
 
@@ -323,7 +439,7 @@ async fn fetch_m3u8_by_channel(
 
 async fn ensure_ffplay(client: &reqwest::Client) -> Result<(), anyhow::Error> {
     let ffpath = ".\\ffplay.exe";
-    aerr!("Checking for {}\n", ffpath)?;
+    stderr!("Checking for {}\n", ffpath)?;
     let attr_res = tokio::fs::metadata(ffpath).await;
     match attr_res {
         Ok(attr) => {
@@ -336,11 +452,11 @@ async fn ensure_ffplay(client: &reqwest::Client) -> Result<(), anyhow::Error> {
             if err.kind() != std::io::ErrorKind::NotFound {
                 return Err(err.into());
             } else {
-                aerr!("NotFound: {}\n", ffpath)?;
+                stderr!("NotFound: {}\n", ffpath)?;
             }
         }
     }
-    aerr!("Downloading ffplay\n")?;
+    stderr!("Downloading ffplay\n")?;
     let res = client
         .get("https://github.com/Szperak/twitchlink/blob/master/ffplay.zip?raw=true")
         .send()
@@ -351,7 +467,7 @@ async fn ensure_ffplay(client: &reqwest::Client) -> Result<(), anyhow::Error> {
     let mut zip = zip::ZipArchive::new(reader)?;
     for i in 0..zip.len() {
         let mut file = zip.by_index(i).unwrap();
-        aerr!("Extracting filename: {}\n", file.name())?;
+        stderr!("Extracting filename: {}\n", file.name())?;
 
         use std::io::prelude::*;
         //let contents = file.bytes();
@@ -374,7 +490,7 @@ async fn ensure_ffplay(client: &reqwest::Client) -> Result<(), anyhow::Error> {
             outfile.write_all(&buf[0..size]).await?;
         }
 
-        aerr!("Extracted filename: {}\n", file.name())?;
+        stderr!("Extracted filename: {}\n", file.name())?;
     }
 
     Ok(())
@@ -403,11 +519,9 @@ fn spawn_ffplay(
             .arg("-flags")
             .arg("low_delay")
             .arg("-vn")
-            .arg("-af")
-            .arg("volume=0.4")
             .arg("-framedrop")
-            .arg("-vf")
-            .arg("setpts=0.5*PTS")
+            .arg("-af")
+            .arg("volume=0.4,atempo=1.005")
             .arg("-strict")
             .arg("experimental")
             .arg("-x")
@@ -419,10 +533,12 @@ fn spawn_ffplay(
     } else {
         cmd.arg("-window_title")
             .arg(format!("{} lowest latency", channel));
+
         cmd.arg("-probesize")
             .arg("32")
             .arg("-sync")
             .arg("ext")
+            .arg("-framedrop")
             .arg("-vf")
             .arg("setpts=0.5*PTS")
             .arg("-x")
@@ -444,13 +560,108 @@ fn spawn_ffplay(
 
     let process_ended = copy_ended.clone();
     tokio::task::spawn_local(async move {
-        let status = child.await.expect("child process encountered an error");
+        let status = child
+            .wait()
+            .await
+            .expect("child process encountered an error");
 
-        let _ = aerr!("child status was: {}", status);
+        let _ = stderr!("child status was: {}", status);
         *process_ended.borrow_mut() = true;
     });
 
     stdin
+}
+
+async fn make_outs(
+    out_names: &mut Vec<&str>,
+    copy_ended: Rc<RefCell<bool>>,
+    channel: &str,
+) -> Result<Vec<Box<dyn AsyncWrite + Unpin>>, anyhow::Error> {
+    let mut outs: Vec<Box<dyn AsyncWrite + Unpin>> = Vec::new();
+
+    while let Some(out_name) = out_names.pop() {
+        match out_name {
+            "ffplay" => {
+                out_names.push("video");
+                out_names.push("audio");
+            }
+            "video" => {
+                let stdin_video = spawn_ffplay(&copy_ended, channel, false);
+                outs.push(Box::new(stdin_video));
+            }
+            "audio" => {
+                let stdin_audio = spawn_ffplay(&copy_ended, channel, true);
+                outs.push(Box::new(stdin_audio));
+            }
+            "out" => {
+                outs.push(Box::new(io::stdout()));
+            }
+            "stdout" => {
+                outs.push(Box::new(io::stdout()));
+            }
+            "stderr" => {
+                outs.push(Box::new(io::stderr()));
+            }
+            other_out => {
+                const TCP_O: &str = "tcp:";
+                const UNIX_O: &str = "unix:";
+                if other_out.starts_with(TCP_O) {
+                    let addr = &other_out[TCP_O.len()..];
+                    use tokio::net::TcpStream;
+                    let stream = TcpStream::connect(addr)
+                        .await
+                        .map_err(|err| TwitchlinkError::TCPConnectError(err))?;
+                    outs.push(Box::new(stream));
+                } else if other_out.starts_with(UNIX_O) {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let addr = &other_out[UNIX_O.len()..];
+                        use tokio::net::UnixStream;
+
+                        let stream = UnixStream::connect(addr)
+                            .await
+                            .map_err(|err| TwitchlinkError::UnixConnectError(err))?;
+                        outs.push(Box::new(stream));
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        return Err(TwitchlinkError::NoUnixSocketError.into());
+                    }
+                } else {
+                    let file = File::create(other_out)
+                        .await
+                        .map_err(|err| TwitchlinkError::FileCreateError(err))?;
+                    outs.push(Box::new(file));
+                }
+            }
+        }
+    }
+    Ok(outs)
+}
+fn make_out_writers(
+    outs: Vec<Box<dyn AsyncWrite + Unpin>>,
+    copy_ended: Rc<RefCell<bool>>,
+) -> Vec<Sender<Rc<Vec<u8>>>> {
+    let mut txbufs = Vec::new();
+    for mut out in outs {
+        let channel_size = 256;
+        let (txbuf, rxbuf) = mpsc::channel::<Rc<Vec<u8>>>(channel_size);
+        let copy_endedc = copy_ended.clone();
+
+        txbufs.push(txbuf);
+        tokio::task::spawn_local(async move {
+            let res = copy_channel_to_out(rxbuf, &mut out).await;
+            match res {
+                Err(err) => {
+                    let _ = stderr!("copy_channel_to_out err: {}\n", err);
+                }
+                Ok(_) => {}
+            }
+            let _ = stderr!("copy_channel_to_out ending\n");
+            *copy_endedc.borrow_mut() = true;
+        });
+    }
+    txbufs
 }
 
 #[tokio::main]
@@ -462,7 +673,6 @@ async fn main() -> Result<(), anyhow::Error> {
         .about("Lowest possible m3u8 latency, acquires playlist url, async segment fetching")
         .arg(
             Arg::with_name("out")
-
                 .short("O")
                 .long("out")
                 .takes_value(true)
@@ -506,69 +716,58 @@ async fn main() -> Result<(), anyhow::Error> {
     if m3u8playlist_url == "null" {
         m3u8playlist_url = fetch_m3u8_by_channel(&client, channel.to_string()).await?;
     }
-    aerr!("url: {}\n", m3u8playlist_url)?;
+
+    stderr!("url: {}\n", m3u8playlist_url)?;
 
     let local = tokio::task::LocalSet::new();
     // Run the local task set.
     local
         .run_until(async move {
             let copy_ended = Rc::new(RefCell::new(false));
-            let mut outs: Vec<Box<dyn AsyncWrite + Unpin>> = Vec::new();
+            let f1video_audio = start_ordered_download(
+                client,
+                &mut out_names,
+                copy_ended,
+                m3u8playlist_url,
+                channel,
+            );
 
-            while let Some(out_name) = out_names.pop() {
-                match out_name {
-                    "ffplay" => {
-                        out_names.push("video");
-                        out_names.push("audio");
-                    },
-                    "video" => {
-                        let stdin_video = spawn_ffplay(&copy_ended, channel, false);
-                        outs.push(Box::new(stdin_video));
-                    }
-                    "audio" => {
-                        let stdin_audio = spawn_ffplay(&copy_ended, channel, true);
-                        outs.push(Box::new(stdin_audio));
-                    }
-                    "out" => {
-                        outs.push(Box::new(io::stdout()));
-                    }
-                    "stdout" => {
-                        outs.push(Box::new(io::stdout()));
-                    }
-                    default_filepath => {
-                        outs.push(Box::new(File::create(default_filepath).await.unwrap()));
-                    }
-                }
-            }
+            let mut f1video = Box::pin(f1video_audio.fuse());
+            //let mut f2audio = Box::pin(f2audio.fuse());
+            let result = select! {
+                x = f1video => x,
+                //x = f2audio => {x},
+            };
+            result?;
 
-
-            let mut txbufs = Vec::new();
-            for mut out in outs {
-                let (txbuf, rxbuf) = mpsc::channel::<Vec<u8>>(1024 * 8);
-                let copy_endedc = copy_ended.clone();
-
-                txbufs.push(txbuf);
-                tokio::task::spawn_local(async move {
-                    let res = copy_channel_to_out(rxbuf, &mut out).await;
-                    match res {
-                        Err(err) => {
-                            let _ = aerr!("copy_channel_to_out err: {}\n", err);
-                        }
-                        Ok(_) => {}
-                    }
-                    let _ = aerr!("copy_channel_to_out ending\n");
-                    *copy_endedc.borrow_mut() = true;
-                });
-            }
-
-            tokio::task::spawn_local(async move {
-                reload_loop(client, m3u8playlist_url, &mut txbufs, copy_ended)
-                    .await
-                    .unwrap();
-            })
-            .await
+            let res: Result<(), anyhow::Error> = Ok(());
+            res
         })
         .await?;
+
+    Ok(())
+}
+
+async fn start_ordered_download(
+    client: reqwest::Client,
+    mut out_names: &mut Vec<&str>,
+    copy_ended: Rc<RefCell<bool>>,
+    m3u8playlist_url: String,
+    channel: &str,
+) -> Result<(), anyhow::Error> {
+    //let mut outs: Vec<Box<dyn AsyncWrite + Unpin>> = Vec::new();
+
+    let outs = make_outs(&mut out_names, copy_ended.clone(), channel).await?;
+
+    let mut txbufs = make_out_writers(outs, copy_ended.clone());
+
+    tokio::task::spawn_local(async move {
+        reload_loop(client, m3u8playlist_url, &mut txbufs, copy_ended)
+            .await
+            .unwrap();
+    })
+    .await
+    .unwrap();
 
     Ok(())
 }
@@ -577,7 +776,7 @@ async fn recv_timeout<T>(
     rx: &mut Receiver<T>,
     sleep_duration: std::time::Duration,
 ) -> Result<Option<T>, ()> {
-    let sleep = async { tokio::time::delay_for(sleep_duration).await };
+    let sleep = tokio::time::sleep(sleep_duration);
     let done = rx.recv();
 
     let mut f1sleep = Box::pin(sleep.fuse());
@@ -596,5 +795,17 @@ async fn recv_timeout<T>(
 pub enum TwitchlinkError {
     #[display(fmt = "file ffplay.exe is not a file")]
     FileIsNotFFplay,
+
+    #[display(fmt = "TCPConnectError: {}", _0)]
+    TCPConnectError(std::io::Error),
+
+    #[display(fmt = "UnixConnectError: {}", _0)]
+    UnixConnectError(std::io::Error),
+
+    #[display(fmt = "FileCreateError: {}", _0)]
+    FileCreateError(std::io::Error),
+
+    #[display(fmt = "NoUnixSocketError: target_os != linux")]
+    NoUnixSocketError,
 }
 impl std::error::Error for TwitchlinkError {}

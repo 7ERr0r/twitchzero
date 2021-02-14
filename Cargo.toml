@@ -7,8 +7,8 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-reqwest = "*"
-tokio = {version = "0.2", features = ["full"]}
+reqwest = { version = "*", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
 bytes = "*"
 hyper = "*"
 anyhow = "*"
@@ -16,8 +16,9 @@ sha3 = "*"
 hex = "*"
 futures = "*"
 serde = { version = "*", features = ["derive"] }
-serde_json = "1"
+serde_json = "*"
 rand = "*"
 clap = "*"
 zip = { version = "0.5", default-features = false, features = ["deflate"] }
 derive_more = "*"
+hex-literal = "*"
