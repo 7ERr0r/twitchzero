@@ -5,6 +5,10 @@ Similar to streamlink, but without bugs and slow+heavy python.
 Fetches m3u8 URL and joins the segments to the stdout at realtime.
 Resistant to connection (eg. wifi) loss.
 
+Features:
+- No `Arc`
+- Excessive debug
+- ffplay windows on Windows
 
 Build
 ====
