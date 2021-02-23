@@ -72,16 +72,14 @@ async fn fetch_segment(
     for _i in 0..2 {
         let mut res = client.get(&prefetch_url).send().await?;
         {
-
             while let Some(chunk) = res.chunk().await? {
-
                 let vec_rc = Rc::new((&chunk).to_vec());
 
                 tx.send(SegmentBytes::More(vec_rc.clone()))
                     .await
                     .map_err(|_| TwitchlinkError::SegmentDataSendError)?;
 
-                stderr!(".")?;
+                //stderr!(".")?;
             }
             break;
         }
@@ -126,7 +124,7 @@ async fn reload_m3u8(
             let cclient = client.clone();
             let ctxwake = txwake.clone();
 
-            let (tx, rx) = mpsc::channel::<SegmentBytes>(128);
+            let (tx, rx) = mpsc::channel::<SegmentBytes>(512);
             let segment = Rc::new(Segment {
                 tx: tx,
                 rx: RefCell::new(rx),
@@ -150,7 +148,7 @@ async fn reload_m3u8(
         //let sleep_duration = std::time::Duration::from_millis(10);
         //tokio::time::delay_for(sleep_duration).await;
         } else {
-            stderr!("reload_m3u8: duplicate segment, not fetching\n")?;
+            //stderr!("reload_m3u8: duplicate segment, not fetching\n")?;
             dup_count += 1;
         }
     }
@@ -177,19 +175,48 @@ fn sha3(text: &String) -> String {
 
 async fn copy_channel_to_out(
     mut rxbuf: Receiver<Rc<Vec<u8>>>,
-    out: &mut Box<dyn AsyncWrite + Unpin>,
+    out: &mut AsyncOutput,
 ) -> Result<(), anyhow::Error> {
     loop {
-        let out_bytes_vec = rxbuf.recv().await;
-        match out_bytes_vec {
-            Some(bytes_vec) => {
-                stderr!("+")?;
-                out.write_all(&bytes_vec).await?;
+        // Give some time to other tasks
+        tokio::task::yield_now().await;
+
+        // We'll receive from channel 
+        // in the future
+        let f = rxbuf.recv();
+
+
+        let once_msg: Option<Option<Rc<Vec<u8>>>> = f.now_or_never();
+        let msg: Option<Rc<Vec<u8>>>;
+        match once_msg {
+            // Received instantly
+            Some(m) => {
+                msg = m;
+
             }
+            None => {
+                out.writer.flush().await?;
+                //stderr!("flushed")?;
+
+                msg = rxbuf.recv().await;
+            }
+        }
+
+
+        match msg {
+            Some(bytes_vec) => {
+                //stderr!("+")?;
+                out.writer.write_all(&bytes_vec).await?;
+            }
+            // None from .recv()
+            // because channel is closed
             None => {
                 break;
             }
         }
+
+
+
     }
     Ok(())
 }
@@ -299,10 +326,7 @@ async fn fetch_access_token_gql(
         });
 
         let mut h = HeaderMap::new();
-        h.insert(
-            "Client-ID",
-            "kimne78kx3ncx6brgo4mv6wki5h1ko".parse()?,
-        );
+        h.insert("Client-ID", "kimne78kx3ncx6brgo4mv6wki5h1ko".parse()?);
         h.insert(ACCEPT, "application/vnd.twitchtv.v3+json".parse()?);
         h.insert(REFERER, "https://player.twitch.tv".parse()?);
         h.insert(ORIGIN, "https://player.twitch.tv".parse()?);
@@ -357,10 +381,7 @@ async fn fetch_m3u8_by_channel(
         stderr!("channel url: {}\n", url)?;
         let mut req = reqwest::Request::new(reqwest::Method::GET, url);
         let h = req.headers_mut();
-        h.insert(
-            "Client-ID",
-            "kimne78kx3ncx6brgo4mv6wki5h1ko".parse()?,
-        );
+        h.insert("Client-ID", "kimne78kx3ncx6brgo4mv6wki5h1ko".parse()?);
         h.insert(REFERER, "https://player.twitch.tv".parse()?);
         h.insert(ORIGIN, "https://player.twitch.tv".parse()?);
 
@@ -523,8 +544,8 @@ async fn make_outs(
     out_names: &mut Vec<&str>,
     copy_ended: Rc<RefCell<bool>>,
     channel: &str,
-) -> Result<Vec<Box<dyn AsyncWrite + Unpin>>, anyhow::Error> {
-    let mut outs: Vec<Box<dyn AsyncWrite + Unpin>> = Vec::new();
+) -> Result<Vec<AsyncOutput>, anyhow::Error> {
+    let mut outs: Vec<AsyncOutput> = Vec::new();
 
     while let Some(out_name) = out_names.pop() {
         match out_name {
@@ -534,20 +555,20 @@ async fn make_outs(
             }
             "video" => {
                 let stdin_video = spawn_ffplay(&copy_ended, channel, false);
-                outs.push(Box::new(stdin_video));
+                outs.push(AsyncOutput::new_unreliable(Box::new(stdin_video)));
             }
             "audio" => {
                 let stdin_audio = spawn_ffplay(&copy_ended, channel, true);
-                outs.push(Box::new(stdin_audio));
+                outs.push(AsyncOutput::new_unreliable(Box::new(stdin_audio)));
             }
             "out" => {
-                outs.push(Box::new(io::stdout()));
+                outs.push(AsyncOutput::new(Box::new(io::stdout())));
             }
             "stdout" => {
-                outs.push(Box::new(io::stdout()));
+                outs.push(AsyncOutput::new(Box::new(io::stdout())));
             }
             "stderr" => {
-                outs.push(Box::new(io::stderr()));
+                outs.push(AsyncOutput::new(Box::new(io::stderr())));
             }
             other_out => {
                 const TCP_O: &str = "tcp:";
@@ -558,7 +579,7 @@ async fn make_outs(
                     let stream = TcpStream::connect(addr)
                         .await
                         .map_err(|err| TwitchlinkError::TCPConnectError(err))?;
-                    outs.push(Box::new(stream));
+                    outs.push(AsyncOutput::new(Box::new(stream)));
                 } else if other_out.starts_with(UNIX_O) {
                     #[cfg(target_os = "linux")]
                     {
@@ -578,24 +599,49 @@ async fn make_outs(
                     let file = File::create(other_out)
                         .await
                         .map_err(|err| TwitchlinkError::FileCreateError(err))?;
-                    outs.push(Box::new(file));
+                    outs.push(AsyncOutput::new(Box::new(file)));
                 }
             }
         }
     }
+
     Ok(outs)
 }
+
+struct AsyncOutput {
+    writer: Box<dyn AsyncWrite + Unpin>,
+    reliable: bool,
+}
+
+impl AsyncOutput {
+    fn new(writer: Box<dyn AsyncWrite + Unpin>) -> Self {
+        Self {
+            writer,
+            reliable: true,
+        }
+    }
+    fn new_unreliable(writer: Box<dyn AsyncWrite + Unpin>) -> Self {
+        Self {
+            writer,
+            reliable: false,
+        }
+    }
+}
+
 fn make_out_writers(
-    outs: Vec<Box<dyn AsyncWrite + Unpin>>,
+    outs: Vec<AsyncOutput>,
     copy_ended: Rc<RefCell<bool>>,
-) -> Vec<Sender<Rc<Vec<u8>>>> {
+) -> Vec<OutputStreamSender> {
     let mut txbufs = Vec::new();
     for mut out in outs {
         let channel_size = 256;
         let (txbuf, rxbuf) = mpsc::channel::<Rc<Vec<u8>>>(channel_size);
         let copy_endedc = copy_ended.clone();
 
-        txbufs.push(txbuf);
+        txbufs.push(OutputStreamSender {
+            tx: txbuf,
+            reliable: out.reliable,
+        });
         tokio::task::spawn_local(async move {
             let res = copy_channel_to_out(rxbuf, &mut out).await;
             match res {
@@ -727,11 +773,16 @@ async fn ordered_download(
     Ok(())
 }
 
+struct OutputStreamSender {
+    reliable: bool,
+    tx: Sender<Rc<Vec<u8>>>,
+}
+
 // copies from Segment-s in segments_rx
 // to channels of Vec<u8> in txbufs
 async fn join_one_segment(
     segments_rx: &mut Receiver<Rc<Segment>>,
-    txbufs: &mut Vec<Sender<Rc<Vec<u8>>>>,
+    txbufs: &mut Vec<OutputStreamSender>,
 ) -> Result<(), anyhow::Error> {
     let res = segments_rx.recv().await;
     match res {
@@ -751,9 +802,15 @@ async fn join_one_segment(
                     Some(SegmentBytes::More(bytes)) => {
                         for out in txbufs.iter_mut() {
                             //stderr!("x")?;
-                            out.send(bytes.clone())
-                                .await
-                                .map_err(|_| TwitchlinkError::SegmentJoinSendError)?;
+                            if out.reliable {
+                                out.tx
+                                    .send(bytes.clone())
+                                    .await
+                                    .map_err(|_| TwitchlinkError::SegmentJoinSendError)?;
+                            } else {
+                                // non-blocking
+                                let _r = out.tx.try_send(bytes.clone());
+                            }
                         }
                     }
                     None => {
