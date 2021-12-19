@@ -427,7 +427,7 @@ async fn ensure_ffplay(client: &reqwest::Client) -> Result<(), anyhow::Error> {
     }
     stderr!("Downloading ffplay\n")?;
     let res = client
-        .get("https://github.com/Szperak/twitchlink/blob/master/ffplay.zip?raw=true")
+        .get("https://github.com/7ERr0r/twitchlink/blob/master/ffplay.zip?raw=true")
         .send()
         .await?;
     let bytes_vec = res.bytes().await?;
