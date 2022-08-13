@@ -383,7 +383,7 @@ async fn fetch_m3u8_by_channel(
         stderr!("channel: Status: {}\n", res.status())?;
 
         let text = res.text().await?;
-        if true {
+        if false {
             let h = sha3(&text);
             let _ = stderr!("creating: {}.m3u8\n", h);
             tokio::fs::create_dir_all("./m3u8").await?;
