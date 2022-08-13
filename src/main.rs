@@ -181,10 +181,9 @@ async fn copy_channel_to_out(
         // Give some time to other tasks
         tokio::task::yield_now().await;
 
-        // We'll receive from channel 
+        // We'll receive from channel
         // in the future
         let f = rxbuf.recv();
-
 
         let once_msg: Option<Option<Rc<Vec<u8>>>> = f.now_or_never();
         let msg: Option<Rc<Vec<u8>>>;
@@ -192,7 +191,6 @@ async fn copy_channel_to_out(
             // Received instantly
             Some(m) => {
                 msg = m;
-
             }
             None => {
                 out.writer.flush().await?;
@@ -201,7 +199,6 @@ async fn copy_channel_to_out(
                 msg = rxbuf.recv().await;
             }
         }
-
 
         match msg {
             Some(bytes_vec) => {
@@ -214,9 +211,6 @@ async fn copy_channel_to_out(
                 break;
             }
         }
-
-
-
     }
     Ok(())
 }
@@ -389,9 +383,10 @@ async fn fetch_m3u8_by_channel(
         stderr!("channel: Status: {}\n", res.status())?;
 
         let text = res.text().await?;
-        if false {
+        if true {
             let h = sha3(&text);
             let _ = stderr!("creating: {}.m3u8\n", h);
+            tokio::fs::create_dir_all("./m3u8").await?;
             let mut file = File::create(format!("m3u8/{}.m3u8", h)).await?;
             file.write_all(&text.as_bytes()).await?;
         }
@@ -406,28 +401,73 @@ async fn fetch_m3u8_by_channel(
     Ok(playlist_url)
 }
 
-async fn ensure_ffplay(client: &reqwest::Client) -> Result<(), anyhow::Error> {
+async fn check_ffplay_exists() -> Result<FFplayLocation, anyhow::Error> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+    let env_path = FFplayLocation::SystemEnvPath.ffplay_path();
+    match Command::new(env_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {
+            //stderr!("ffplay was spawned from path :)\n")?;
+            return Ok(FFplayLocation::SystemEnvPath);
+        },
+        Err(e) => {
+            if let std::io::ErrorKind::NotFound = e.kind() {
+                // check next
+            } else {
+                return Err(e.into())
+            }
+        }
+    }
     let ffpath = ".\\ffplay.exe";
-    stderr!("Checking for {}\n", ffpath)?;
+    stderr!("Checking for file {}\n", ffpath)?;
     let attr_res = tokio::fs::metadata(ffpath).await;
     match attr_res {
         Ok(attr) => {
             if attr.is_file() {
-                return Ok(());
+                return Ok(FFplayLocation::CurrentDir);
             }
-            return Err(TwitchlinkError::FileIsNotFFplay.into());
         }
+
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
                 return Err(err.into());
-            } else {
-                stderr!("NotFound: {}\n", ffpath)?;
             }
         }
     }
-    stderr!("Downloading ffplay\n")?;
+    return Ok(FFplayLocation::NotFound);
+}
+
+#[derive(Copy, Clone, Debug)]
+enum FFplayLocation {
+    SystemEnvPath,
+    CurrentDir,
+    NotFound,
+}
+
+impl FFplayLocation {
+    pub fn ffplay_path(&self) -> &str {
+        match self {
+            FFplayLocation::SystemEnvPath => "ffplay",
+            FFplayLocation::CurrentDir => ".//ffplay",
+            FFplayLocation::NotFound => "",
+        }
+    }
+}
+
+async fn ensure_ffplay(client: &reqwest::Client) -> Result<FFplayLocation, anyhow::Error> {
+    let ffplay_location = check_ffplay_exists().await?;
+    if let FFplayLocation::NotFound = ffplay_location {
+
+    }else{
+        return Ok(ffplay_location);
+    }
+    stderr!("Not found ffplay, Downloading ffplay\n")?;
     let res = client
-        .get("https://github.com/7ERr0r/twitchlink/blob/master/ffplay.zip?raw=true")
+        .get("https://github.com/7ERr0r/twitchzero/blob/master/ffplay.zip?raw=true")
         .send()
         .await?;
     let bytes_vec = res.bytes().await?;
@@ -461,18 +501,19 @@ async fn ensure_ffplay(client: &reqwest::Client) -> Result<(), anyhow::Error> {
         stderr!("Extracted filename: {}\n", file.name())?;
     }
 
-    Ok(())
+    Ok(FFplayLocation::CurrentDir)
 }
 
 fn spawn_ffplay(
     copy_ended: &Rc<RefCell<bool>>,
     channel: &str,
     onlyaudio: bool,
+    ffplay_location: FFplayLocation,
 ) -> tokio::process::ChildStdin {
     use std::process::Stdio;
     use tokio::process::Command;
 
-    let mut cmd = Box::new(Command::new(".\\ffplay"));
+    let mut cmd = Box::new(Command::new(ffplay_location.ffplay_path()));
 
     // audio
     // ffplay -window_title "%channel%" -fflags nobuffer -flags low_delay -af volume=0.2 -x 1280 -y 720 -i -
@@ -544,6 +585,7 @@ async fn make_outs(
     out_names: &mut Vec<&str>,
     copy_ended: Rc<RefCell<bool>>,
     channel: &str,
+    ffplay_location: FFplayLocation,
 ) -> Result<Vec<AsyncOutput>, anyhow::Error> {
     let mut outs: Vec<AsyncOutput> = Vec::new();
 
@@ -554,11 +596,11 @@ async fn make_outs(
                 out_names.push("audio");
             }
             "video" => {
-                let stdin_video = spawn_ffplay(&copy_ended, channel, false);
+                let stdin_video = spawn_ffplay(&copy_ended, channel, false, ffplay_location);
                 outs.push(AsyncOutput::new_unreliable(Box::new(stdin_video)));
             }
             "audio" => {
-                let stdin_audio = spawn_ffplay(&copy_ended, channel, true);
+                let stdin_audio = spawn_ffplay(&copy_ended, channel, true, ffplay_location);
                 outs.push(AsyncOutput::new_unreliable(Box::new(stdin_audio)));
             }
             "out" => {
@@ -666,7 +708,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .about("Lowest possible m3u8 latency, acquires playlist url, async segment fetching")
         .arg(
             Arg::with_name("out")
-                .short("O")
+                .short('O')
                 .long("out")
                 .takes_value(true)
                 .multiple(true)
@@ -675,14 +717,14 @@ async fn main() -> Result<(), anyhow::Error> {
         )
         .arg(
             Arg::with_name("m3u8")
-                .short("p")
+                .short('p')
                 .long("playlist")
                 .takes_value(true)
                 .help("Playlist url"),
         )
         .arg(
             Arg::with_name("channel")
-                .short("c")
+                .short('c')
                 .long("channel")
                 .takes_value(true)
                 .help("Twitch channel url"),
@@ -702,8 +744,9 @@ async fn main() -> Result<(), anyhow::Error> {
         .build()
         .expect("should be able to build reqwest client");
 
+    let mut ffplay_location = FFplayLocation::NotFound;
     if out_names.contains(&"ffplay") {
-        ensure_ffplay(&client).await?;
+        ffplay_location = ensure_ffplay(&client).await?;
     }
 
     if m3u8playlist_url == "null" {
@@ -724,6 +767,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 copy_ended,
                 m3u8playlist_url,
                 channel,
+                ffplay_location,
             )
             .await;
 
@@ -740,8 +784,9 @@ async fn ordered_download(
     copy_ended: Rc<RefCell<bool>>,
     m3u8playlist_url: String,
     channel: &str,
+    ffplay_location: FFplayLocation,
 ) -> Result<(), anyhow::Error> {
-    let outs = make_outs(&mut out_names, copy_ended.clone(), channel).await?;
+    let outs = make_outs(&mut out_names, copy_ended.clone(), channel, ffplay_location).await?;
 
     let mut txbufs = make_out_writers(outs, copy_ended.clone());
 
