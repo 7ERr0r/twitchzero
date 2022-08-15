@@ -20,6 +20,44 @@ use tokio::sync::mpsc::Sender;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Copy, Clone, Default, PartialEq, Eq)]
+pub struct IsAudioVideo(bool);
+
+impl IsAudioVideo {
+    pub fn audio() -> Self {
+        Self(true)
+    }
+    pub fn video() -> Self {
+        Self(false)
+    }
+
+    pub fn is_audio(&self) -> bool {
+        self.0
+    }
+    pub fn is_video(&self) -> bool {
+        !self.is_audio()
+    }
+
+    pub fn name(&self) -> &str {
+        if self.is_audio() {
+            "audio"
+        } else {
+            "video"
+        }
+    }
+}
+
+impl std::fmt::Display for IsAudioVideo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_audio() {
+            write!(f, "[AUD]")?;
+        } else {
+            write!(f, "[VID]")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct TokenSig {
     token: String,
@@ -413,12 +451,12 @@ async fn check_ffplay_exists() -> Result<FFplayLocation, anyhow::Error> {
         Ok(_) => {
             //stderr!("ffplay was spawned from path :)\n")?;
             return Ok(FFplayLocation::SystemEnvPath);
-        },
+        }
         Err(e) => {
             if let std::io::ErrorKind::NotFound = e.kind() {
                 // check next
             } else {
-                return Err(e.into())
+                return Err(e.into());
             }
         }
     }
@@ -442,7 +480,9 @@ async fn check_ffplay_exists() -> Result<FFplayLocation, anyhow::Error> {
 }
 
 #[derive(Copy, Clone, Debug)]
+#[derive(PartialEq)]
 enum FFplayLocation {
+    NotChecked,
     SystemEnvPath,
     CurrentDir,
     NotFound,
@@ -451,6 +491,7 @@ enum FFplayLocation {
 impl FFplayLocation {
     pub fn ffplay_path(&self) -> &str {
         match self {
+            FFplayLocation::NotChecked => "",
             FFplayLocation::SystemEnvPath => "ffplay",
             FFplayLocation::CurrentDir => ".//ffplay",
             FFplayLocation::NotFound => "",
@@ -461,8 +502,7 @@ impl FFplayLocation {
 async fn ensure_ffplay(client: &reqwest::Client) -> Result<FFplayLocation, anyhow::Error> {
     let ffplay_location = check_ffplay_exists().await?;
     if let FFplayLocation::NotFound = ffplay_location {
-
-    }else{
+    } else {
         return Ok(ffplay_location);
     }
     stderr!("Not found ffplay, Downloading ffplay\n")?;
@@ -504,16 +544,21 @@ async fn ensure_ffplay(client: &reqwest::Client) -> Result<FFplayLocation, anyho
     Ok(FFplayLocation::CurrentDir)
 }
 
-fn spawn_ffplay(
+async fn spawn_ffplay(
+    client: &reqwest::Client,
     copy_ended: &Rc<RefCell<bool>>,
     channel: &str,
-    onlyaudio: bool,
-    ffplay_location: FFplayLocation,
-) -> tokio::process::ChildStdin {
+    isav: IsAudioVideo,
+    ffplay_location: Rc<RefCell<FFplayLocation>>,
+) -> Result<tokio::process::ChildStdin, anyhow::Error> {
+    if *ffplay_location.borrow() == FFplayLocation::NotChecked {
+        *ffplay_location.borrow_mut() = ensure_ffplay(&client).await?;
+    }
+
     use std::process::Stdio;
     use tokio::process::Command;
 
-    let mut cmd = Box::new(Command::new(ffplay_location.ffplay_path()));
+    let mut cmd = Box::new(Command::new(ffplay_location.borrow().ffplay_path()));
 
     // audio
     // ffplay -window_title "%channel%" -fflags nobuffer -flags low_delay -af volume=0.2 -x 1280 -y 720 -i -
@@ -521,7 +566,7 @@ fn spawn_ffplay(
     // video
     // ffplay -window_title "%channel%" -probesize 32 -sync ext -af volume=0.3 -vf setpts=0.5*PTS -x 1280 -y 720 -i -
 
-    if onlyaudio {
+    if isav.is_audio() {
         cmd.arg("-window_title").arg(format!("{} audio", channel));
         cmd.arg("-fflags")
             .arg("nobuffer")
@@ -534,9 +579,9 @@ fn spawn_ffplay(
             .arg("-strict")
             .arg("experimental")
             .arg("-x")
-            .arg("1280")
+            .arg("320")
             .arg("-y")
-            .arg("720")
+            .arg("240")
             .arg("-i")
             .arg("-");
     } else {
@@ -558,7 +603,19 @@ fn spawn_ffplay(
             .arg("-");
     }
 
-    cmd.stderr(Stdio::null()).stdin(Stdio::piped());
+    let write_stdout = false;
+    let (err, out) = if write_stdout {
+        let file_out = File::create(format!("ffplay_{}_stdout.txt", isav.name())).await?;
+        let file_err = File::create(format!("ffplay_{}_stderr.txt", isav.name())).await?;
+        (
+            Stdio::from(file_out.into_std().await),
+            Stdio::from(file_err.into_std().await),
+        )
+    } else {
+        (Stdio::null(), Stdio::null())
+    };
+
+    cmd.stdout(out).stderr(err).stdin(Stdio::piped());
 
     let mut child = cmd.spawn().expect("failed to spawn ffplay");
 
@@ -574,18 +631,21 @@ fn spawn_ffplay(
             .await
             .expect("child process encountered an error");
 
-        let _ = stderr!("child status was: {}", status);
-        *process_ended.borrow_mut() = true;
+        let _ = stderr!("child status was: {}\n", status);
+        if isav.is_video() {
+            *process_ended.borrow_mut() = true;
+        }
     });
 
-    stdin
+    Ok(stdin)
 }
 
 async fn make_outs(
+    client: &reqwest::Client,
     out_names: &mut Vec<&str>,
     copy_ended: Rc<RefCell<bool>>,
     channel: &str,
-    ffplay_location: FFplayLocation,
+    ffplay_location: Rc<RefCell<FFplayLocation>>,
 ) -> Result<Vec<AsyncOutput>, anyhow::Error> {
     let mut outs: Vec<AsyncOutput> = Vec::new();
 
@@ -596,12 +656,26 @@ async fn make_outs(
                 out_names.push("audio");
             }
             "video" => {
-                let stdin_video = spawn_ffplay(&copy_ended, channel, false, ffplay_location);
+                let stdin_video = spawn_ffplay(
+                    client,
+                    &copy_ended,
+                    channel,
+                    IsAudioVideo::video(),
+                    ffplay_location.clone(),
+                )
+                .await?;
                 outs.push(AsyncOutput::new_unreliable(Box::new(stdin_video)));
             }
             "audio" => {
-                let stdin_audio = spawn_ffplay(&copy_ended, channel, true, ffplay_location);
-                outs.push(AsyncOutput::new_unreliable(Box::new(stdin_audio)));
+                let stdin_audio = spawn_ffplay(
+                    client,
+                    &copy_ended,
+                    channel,
+                    IsAudioVideo::audio(),
+                    ffplay_location.clone(),
+                )
+                .await?;
+                outs.push(AsyncOutput::new_unreliable_ignored(Box::new(stdin_audio)));
             }
             "out" => {
                 outs.push(AsyncOutput::new(Box::new(io::stdout())));
@@ -652,7 +726,9 @@ async fn make_outs(
 
 struct AsyncOutput {
     writer: Box<dyn AsyncWrite + Unpin>,
-    reliable: bool,
+    pub reliable: bool,
+    // false to ignore process exit code or pipe being closed
+    pub end_on_broken_pipe: bool,
 }
 
 impl AsyncOutput {
@@ -660,12 +736,21 @@ impl AsyncOutput {
         Self {
             writer,
             reliable: true,
+            end_on_broken_pipe: true,
         }
     }
     fn new_unreliable(writer: Box<dyn AsyncWrite + Unpin>) -> Self {
         Self {
             writer,
             reliable: false,
+            end_on_broken_pipe: true,
+        }
+    }
+    fn new_unreliable_ignored(writer: Box<dyn AsyncWrite + Unpin>) -> Self {
+        Self {
+            writer,
+            reliable: false,
+            end_on_broken_pipe: false,
         }
     }
 }
@@ -684,6 +769,7 @@ fn make_out_writers(
             tx: txbuf,
             reliable: out.reliable,
         });
+        let end_on_broken_pipe = out.end_on_broken_pipe;
         tokio::task::spawn_local(async move {
             let res = copy_channel_to_out(rxbuf, &mut out).await;
             match res {
@@ -692,8 +778,13 @@ fn make_out_writers(
                 }
                 Ok(_) => {}
             }
-            let _ = stderr!("copy_channel_to_out ending\n");
-            *copy_endedc.borrow_mut() = true;
+            
+            if end_on_broken_pipe {
+                let _ = stderr!("copy_channel_to_out ending (flagging copy_endedc)\n");
+                *copy_endedc.borrow_mut() = true;
+            }else{
+                let _ = stderr!("copy_channel_to_out ending (not flagging end channel)\n");
+            }
         });
     }
     txbufs
@@ -738,16 +829,18 @@ async fn main() -> Result<(), anyhow::Error> {
         .unwrap_or(def);
 
     let mut m3u8playlist_url = matches.value_of("m3u8").unwrap_or("null").to_string();
-    let channel = matches.value_of("channel").unwrap_or("georgehotz");
+    let channel = matches.value_of("channel").unwrap_or("monstercat");
 
     let client = reqwest::Client::builder()
         .build()
         .expect("should be able to build reqwest client");
 
-    let mut ffplay_location = FFplayLocation::NotFound;
-    if out_names.contains(&"ffplay") {
-        ffplay_location = ensure_ffplay(&client).await?;
-    }
+    let ffplay_location = Rc::new(RefCell::new(FFplayLocation::NotChecked));
+    // // TODO: shorten but check only once
+    // if out_names.contains(&"ffplay") || out_names.contains(&"audio") || out_names.contains(&"video")
+    // {
+    //     ffplay_location = ensure_ffplay(&client).await?;
+    // }
 
     if m3u8playlist_url == "null" {
         m3u8playlist_url = fetch_m3u8_by_channel(&client, channel.to_string()).await?;
@@ -784,9 +877,16 @@ async fn ordered_download(
     copy_ended: Rc<RefCell<bool>>,
     m3u8playlist_url: String,
     channel: &str,
-    ffplay_location: FFplayLocation,
+    ffplay_location: Rc<RefCell<FFplayLocation>>,
 ) -> Result<(), anyhow::Error> {
-    let outs = make_outs(&mut out_names, copy_ended.clone(), channel, ffplay_location).await?;
+    let outs = make_outs(
+        &client,
+        &mut out_names,
+        copy_ended.clone(),
+        channel,
+        ffplay_location.clone(),
+    )
+    .await?;
 
     let mut txbufs = make_out_writers(outs, copy_ended.clone());
 
