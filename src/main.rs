@@ -546,7 +546,7 @@ async fn ensure_ffplay(client: &reqwest::Client) -> Result<FFplayLocation, anyho
 
 async fn spawn_ffplay(
     client: &reqwest::Client,
-    copy_ended: &Rc<RefCell<bool>>,
+    copy_ended: Option<Rc<RefCell<bool>>>,
     channel: &str,
     isav: IsAudioVideo,
     ffplay_location: Rc<RefCell<FFplayLocation>>,
@@ -624,7 +624,7 @@ async fn spawn_ffplay(
         .take()
         .expect("child did not have a handle to stdin");
 
-    let process_ended = copy_ended.clone();
+    let copy_ended = copy_ended.clone();
     tokio::task::spawn_local(async move {
         let status = child
             .wait()
@@ -632,8 +632,8 @@ async fn spawn_ffplay(
             .expect("child process encountered an error");
 
         let _ = stderr!("child status was: {}\n", status);
-        if isav.is_video() {
-            *process_ended.borrow_mut() = true;
+        if let Some(copy_ended) = copy_ended {
+            *copy_ended.borrow_mut() = true;
         }
     });
 
@@ -658,7 +658,7 @@ async fn make_outs(
             "video" => {
                 let stdin_video = spawn_ffplay(
                     client,
-                    &copy_ended,
+                    Some(copy_ended.clone()),
                     channel,
                     IsAudioVideo::video(),
                     ffplay_location.clone(),
@@ -669,7 +669,7 @@ async fn make_outs(
             "audio" => {
                 let stdin_audio = spawn_ffplay(
                     client,
-                    &copy_ended,
+                    None,
                     channel,
                     IsAudioVideo::audio(),
                     ffplay_location.clone(),
