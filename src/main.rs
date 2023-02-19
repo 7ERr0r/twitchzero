@@ -1,7 +1,16 @@
-use reqwest::header::HeaderMap;
-use reqwest::header::ACCEPT;
-use reqwest::header::ORIGIN;
-use reqwest::header::REFERER;
+mod custom_m3u8;
+mod gql;
+mod isav;
+mod model;
+mod utils;
+
+use clap::command;
+use clap::Parser;
+use custom_m3u8::fetch_m3u8_by_channel;
+use custom_m3u8::reload_m3u8;
+use custom_m3u8::Segment;
+use custom_m3u8::SegmentBytes;
+use isav::IsAudioVideo;
 use tokio::time::Duration;
 
 use futures::future::FutureExt;
@@ -17,199 +26,6 @@ use tokio::io::{self, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
-
-use serde::{Deserialize, Serialize};
-
-#[derive(Copy, Clone, Default, PartialEq, Eq)]
-pub struct IsAudioVideo(bool);
-
-impl IsAudioVideo {
-    pub fn audio() -> Self {
-        Self(true)
-    }
-    pub fn video() -> Self {
-        Self(false)
-    }
-
-    pub fn is_audio(&self) -> bool {
-        self.0
-    }
-    pub fn is_video(&self) -> bool {
-        !self.is_audio()
-    }
-
-    pub fn name(&self) -> &str {
-        if self.is_audio() {
-            "audio"
-        } else {
-            "video"
-        }
-    }
-}
-
-impl std::fmt::Display for IsAudioVideo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_audio() {
-            write!(f, "[AUD]")?;
-        } else {
-            write!(f, "[VID]")?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct TokenSig {
-    token: String,
-    sig: String,
-}
-
-macro_rules! stderr {
-    () => (io::stderr().write_all(&[0; 0]).await);
-    ($($arg:tt)*) => ({
-        io::stderr().write_all(&std::format!($($arg)*).as_bytes()).await
-    })
-}
-
-fn extract_segments(text: &str) -> Vec<&str> {
-    let prefix = "#EXT-X-TWITCH-PREFETCH:";
-    let mut v = Vec::new();
-    for line in text.lines() {
-        if line.starts_with(prefix) {
-            let l = line.trim_start_matches(prefix);
-
-            v.push(l);
-        } else if !line.starts_with("#") {
-            v.push(line);
-        }
-    }
-    v
-}
-
-enum SegmentBytes {
-    EOF,
-    More(Rc<Vec<u8>>),
-}
-
-struct Segment {
-    rx: RefCell<Receiver<SegmentBytes>>,
-    tx: Sender<SegmentBytes>,
-    //done_tx: Sender<bool>,
-}
-
-//type OutBufRef = Sender<Rc<Vec<u8>>>;
-
-async fn fetch_segment(
-    client: reqwest::Client,
-    prefetch_url: String,
-    //outs: &mut Vec<OutBufRef>,
-    segment: Rc<Segment>,
-) -> Result<(), anyhow::Error> {
-    let tx = segment.tx.clone();
-
-    for _i in 0..2 {
-        let mut res = client.get(&prefetch_url).send().await?;
-        {
-            while let Some(chunk) = res.chunk().await? {
-                let vec_rc = Rc::new((&chunk).to_vec());
-
-                tx.send(SegmentBytes::More(vec_rc.clone()))
-                    .await
-                    .map_err(|_| TwitchlinkError::SegmentDataSendError)?;
-
-                //stderr!(".")?;
-            }
-            break;
-        }
-    }
-    tx.send(SegmentBytes::EOF)
-        .await
-        .map_err(|_| TwitchlinkError::SegmentDataSendError)?;
-    drop(tx);
-
-    Ok(())
-}
-
-async fn reload_m3u8(
-    used_segments: &mut HashMap<String, u64>,
-    client: reqwest::Client,
-    m3u8_url: String,
-    segments_tx: Sender<Rc<Segment>>,
-    txwake: Sender<bool>,
-    epoch_number: u64,
-) -> Result<(), anyhow::Error> {
-    let res = client.get(&m3u8_url).send().await?;
-
-    stderr!("reload_m3u8: Status: {}\n", res.status())?;
-
-    let text = res.text().await?;
-
-    let segments_vec = extract_segments(&text);
-    let mut segments = segments_vec.as_slice();
-    let limit = 5;
-    if segments.len() > limit {
-        let (_left, right) = segments.split_at(segments.len() - limit);
-        segments = right;
-    }
-    let num_segments = segments.len();
-    let mut dup_count: usize = 0;
-    for segment_url in segments {
-        let furl = segment_url.to_string();
-        if !used_segments.contains_key(&furl) {
-            used_segments.insert(furl.to_string(), epoch_number);
-
-            stderr!("reload_m3u8: new: {}\n", furl)?;
-            let cclient = client.clone();
-            let ctxwake = txwake.clone();
-
-            let (tx, rx) = mpsc::channel::<SegmentBytes>(512);
-            let segment = Rc::new(Segment {
-                tx: tx,
-                rx: RefCell::new(rx),
-            });
-            segments_tx
-                .send(segment.clone())
-                .await
-                .map_err(|_| TwitchlinkError::SegmentSendError)?;
-
-            tokio::task::spawn_local(async move {
-                let res = fetch_segment(cclient, furl, segment.clone()).await;
-                match res {
-                    Err(err) => {
-                        let _ = stderr!("fetch_segment err: {}", err);
-                    }
-                    _ => {}
-                }
-                let _ = ctxwake.send(true).await;
-            });
-
-        //let sleep_duration = std::time::Duration::from_millis(10);
-        //tokio::time::delay_for(sleep_duration).await;
-        } else {
-            //stderr!("reload_m3u8: duplicate segment, not fetching\n")?;
-            dup_count += 1;
-        }
-    }
-
-    if false {
-        if dup_count == num_segments {
-            let h = sha3(&text);
-            let _ = stderr!("creating: {}.m3u8\n", h);
-            let mut file = File::create(format!("m3u8/{}.m3u8", h)).await?;
-            file.write_all(&text.as_bytes()).await?;
-        }
-    }
-    Ok(())
-}
-
-fn sha3(text: &String) -> String {
-    use sha3::{Digest, Sha3_256};
-    let mut hasher = Sha3_256::new();
-    hasher.update(text.as_bytes());
-    let result = hasher.finalize();
-    let hashname = hex::encode(result);
-    hashname
-}
 
 async fn copy_channel_to_out(
     mut rxbuf: Receiver<Rc<Vec<u8>>>,
@@ -312,133 +128,6 @@ async fn reload_loop(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
-struct GQLTokenSignature {
-    value: String,
-    signature: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[allow(non_snake_case)]
-struct GQLTokenResponseData {
-    streamPlaybackAccessToken: GQLTokenSignature,
-}
-
-#[derive(Serialize, Deserialize)]
-struct GQLTokenResponse {
-    data: GQLTokenResponseData,
-}
-async fn fetch_access_token_gql(
-    client: &reqwest::Client,
-    channel: &String,
-) -> Result<TokenSig, anyhow::Error> {
-    let access_token_addr = format!("https://gql.twitch.tv/gql");
-    let token_sig = {
-        let params = [("platform", "_")];
-        let url = reqwest::Url::parse_with_params(&access_token_addr, &params)?;
-
-        let is_live = true;
-        let login = if is_live { channel } else { "" };
-        let vod_id = if is_live { "" } else { "" };
-        let json_map = serde_json::json!({
-            "operationName": "PlaybackAccessToken",
-            "extensions": {
-                "persistedQuery": {
-                    "version": 1,
-                    "sha256Hash": "0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712"
-                }
-            },
-            "variables": {
-                "isLive": is_live,
-                "login": login,
-                "isVod": !is_live,
-                "vodID": vod_id,
-                "playerType": "embed"
-            }
-        });
-
-        let mut h = HeaderMap::new();
-        h.insert("Client-ID", "kimne78kx3ncx6brgo4mv6wki5h1ko".parse()?);
-        h.insert(ACCEPT, "application/vnd.twitchtv.v3+json".parse()?);
-        h.insert(REFERER, "https://player.twitch.tv".parse()?);
-        h.insert(ORIGIN, "https://player.twitch.tv".parse()?);
-
-        let res = client.post(url).json(&json_map).headers(h).send().await?;
-
-        stderr!("fetch_access_token_gql: Status: {}\n", res.status())?;
-
-        let bytes_vec = res.bytes().await?;
-        stderr!(
-            "fetch_access_token_gql: {}\n",
-            String::from_utf8_lossy(&bytes_vec)
-        )?;
-
-        let gql_resp: GQLTokenResponse = serde_json::from_slice(&bytes_vec)?;
-
-        let token_sig = TokenSig {
-            token: gql_resp.data.streamPlaybackAccessToken.value,
-            sig: gql_resp.data.streamPlaybackAccessToken.signature,
-        };
-        token_sig
-    };
-    Ok(token_sig)
-}
-
-async fn fetch_m3u8_by_channel(
-    client: &reqwest::Client,
-    channel: String,
-) -> Result<String, anyhow::Error> {
-    let token_sig = fetch_access_token_gql(client, &channel).await?;
-
-    let channel_addr = format!("https://usher.ttvnw.net/api/channel/hls/{}.m3u8", channel);
-    let playlist_url = {
-        let mut rng = rand::thread_rng();
-        use rand::prelude::*;
-
-        let mut url = reqwest::Url::parse(&channel_addr)?;
-        {
-            let mut q = url.query_pairs_mut();
-            q.append_pair("player", "twitchweb");
-            let p = format!("{}", (99999.0 * rng.gen::<f64>()) as i64);
-            q.append_pair("p", &p);
-            q.append_pair("type", "any");
-            q.append_pair("allow_source", "true");
-            q.append_pair("allow_audio_only", "true");
-            q.append_pair("allow_spectre", "false");
-
-            q.append_pair("sig", &token_sig.sig);
-            q.append_pair("token", &token_sig.token);
-            q.append_pair("fast_bread", "true");
-        }
-        stderr!("channel url: {}\n", url)?;
-        let mut req = reqwest::Request::new(reqwest::Method::GET, url);
-        let h = req.headers_mut();
-        h.insert("Client-ID", "kimne78kx3ncx6brgo4mv6wki5h1ko".parse()?);
-        h.insert(REFERER, "https://player.twitch.tv".parse()?);
-        h.insert(ORIGIN, "https://player.twitch.tv".parse()?);
-
-        let res = client.execute(req).await?;
-        stderr!("channel: Status: {}\n", res.status())?;
-
-        let text = res.text().await?;
-        if false {
-            let h = sha3(&text);
-            let _ = stderr!("creating: {}.m3u8\n", h);
-            tokio::fs::create_dir_all("./m3u8").await?;
-            let mut file = File::create(format!("m3u8/{}.m3u8", h)).await?;
-            file.write_all(&text.as_bytes()).await?;
-        }
-
-        stderr!("channel: {}\n", &text)?;
-
-        let segments_vec = extract_segments(&text);
-
-        segments_vec.get(0).expect("no m3u8 url found").to_string()
-    };
-
-    Ok(playlist_url)
-}
-
 async fn check_ffplay_exists() -> Result<FFplayLocation, anyhow::Error> {
     use std::process::Stdio;
     use tokio::process::Command;
@@ -479,8 +168,7 @@ async fn check_ffplay_exists() -> Result<FFplayLocation, anyhow::Error> {
     return Ok(FFplayLocation::NotFound);
 }
 
-#[derive(Copy, Clone, Debug)]
-#[derive(PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum FFplayLocation {
     NotChecked,
     SystemEnvPath,
@@ -778,11 +466,11 @@ fn make_out_writers(
                 }
                 Ok(_) => {}
             }
-            
+
             if end_on_broken_pipe {
                 let _ = stderr!("copy_channel_to_out ending (flagging copy_endedc)\n");
                 *copy_endedc.borrow_mut() = true;
-            }else{
+            } else {
                 let _ = stderr!("copy_channel_to_out ending (not flagging end channel)\n");
             }
         });
@@ -790,46 +478,32 @@ fn make_out_writers(
     txbufs
 }
 
+/// twitch low latency
+#[derive(Parser, Debug)]
+#[command(
+    author = "7ERr0r",
+    version,
+    about,
+    long_about = "Lowest possible m3u8 latency on twitch. Acquires playlist url, then downloads with async segment/bytes fetching"
+)]
+struct Args {
+    /// File path or 'out' for stdout, 'ffplay' for player window
+    #[arg(short, long)]
+    out: Option<Vec<String>>,
+
+    /// Playlist url
+    #[arg(short, long)]
+    playlist_m3u8: Option<String>,
+
+    /// Twitch channel url
+    channel: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    use clap::{App, Arg};
-    let matches = App::new("twitch low latency")
-        .version("0.1.0")
-        .author("Szperak")
-        .about("Lowest possible m3u8 latency, acquires playlist url, async segment fetching")
-        .arg(
-            Arg::with_name("out")
-                .short('O')
-                .long("out")
-                .takes_value(true)
-                .multiple(true)
-                .min_values(1)
-                .help("File path or 'out' for stdout, 'ffplay' for player window"),
-        )
-        .arg(
-            Arg::with_name("m3u8")
-                .short('p')
-                .long("playlist")
-                .takes_value(true)
-                .help("Playlist url"),
-        )
-        .arg(
-            Arg::with_name("channel")
-                .short('c')
-                .long("channel")
-                .takes_value(true)
-                .help("Twitch channel url"),
-        )
-        .get_matches();
+    let args = Args::parse();
 
-    let def = vec!["ffplay"];
-    let mut out_names: Vec<&str> = matches
-        .values_of("out")
-        .map(|v| v.collect::<Vec<_>>())
-        .unwrap_or(def);
-
-    let mut m3u8playlist_url = matches.value_of("m3u8").unwrap_or("null").to_string();
-    let channel = matches.value_of("channel").unwrap_or("monstercat");
+    let out_names = args.out.unwrap_or_else(|| vec!["ffplay".into()]);
 
     let client = reqwest::Client::builder()
         .build()
@@ -842,11 +516,13 @@ async fn main() -> Result<(), anyhow::Error> {
     //     ffplay_location = ensure_ffplay(&client).await?;
     // }
 
-    if m3u8playlist_url == "null" {
-        m3u8playlist_url = fetch_m3u8_by_channel(&client, channel.to_string()).await?;
-    }
+    let m3u8playlist_url = if let Some(playlist) = args.playlist_m3u8 {
+        playlist
+    } else {
+        fetch_m3u8_by_channel(&client, args.channel.to_string()).await?
+    };
 
-    stderr!("url: {}\n", m3u8playlist_url)?;
+    stderr!("url: {:?}\n", m3u8playlist_url)?;
 
     let local = tokio::task::LocalSet::new();
     // Run the local task set.
@@ -856,10 +532,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
             let result = ordered_download(
                 client,
-                &mut out_names,
+                out_names.iter().map(|s| s.as_ref()).collect(),
                 copy_ended,
                 m3u8playlist_url,
-                channel,
+                &args.channel,
                 ffplay_location,
             )
             .await;
@@ -873,7 +549,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 async fn ordered_download(
     client: reqwest::Client,
-    mut out_names: &mut Vec<&str>,
+    mut out_names: Vec<&str>,
     copy_ended: Rc<RefCell<bool>>,
     m3u8playlist_url: String,
     channel: &str,

@@ -1,24 +1,24 @@
 [package]
 name = "twitchzero"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Szperak"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 reqwest = { version = "*", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
-bytes = "*"
-hyper = "*"
-anyhow = "*"
-sha3 = "*"
-hex = "*"
 futures = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 rand = "*"
-clap = "*"
 zip = { version = "0.5", default-features = false, features = ["deflate"] }
 derive_more = "*"
 hex-literal = "*"
+clap = { version = "4.1.6", features = ["derive"] }
+bytes = "1.4.0"
+hyper = "0.14.24"
+anyhow = "1.0.69"
+sha3 = "0.10.6"
+hex = "0.4.3"
