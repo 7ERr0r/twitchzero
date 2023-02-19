@@ -1,7 +1,4 @@
-use hyper::{
-    header::{ACCEPT, ORIGIN, REFERER},
-    HeaderMap,
-};
+use reqwest::header::{HeaderMap, ACCEPT, ORIGIN, REFERER};
 
 use crate::{
     model::{GQLTokenResponse, TokenSig},

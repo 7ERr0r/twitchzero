@@ -10,7 +10,7 @@ edition = "2021"
 reqwest = { version = "*", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 futures = "*"
-serde = { version = "*", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "*"
 rand = "*"
 zip = { version = "0.5", default-features = false, features = ["deflate"] }
@@ -18,7 +18,7 @@ derive_more = "*"
 hex-literal = "*"
 clap = { version = "4.1.6", features = ["derive"] }
 bytes = "1.4.0"
-hyper = "0.14.24"
+# hyper = "0.14.24"
 anyhow = "1.0.69"
 sha3 = "0.10.6"
 hex = "0.4.3"

@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use hyper::header::{ORIGIN, REFERER};
+use reqwest::header::{ORIGIN, REFERER};
 use tokio::{
     fs::File,
     io::AsyncWriteExt,
