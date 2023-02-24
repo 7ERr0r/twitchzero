@@ -27,7 +27,7 @@ async fn copy_channel_to_out(
                 break;
             }
         }
-        while let Some(msg) = rxbuf.try_recv().ok() {
+        while let Ok(msg) = rxbuf.try_recv() {
             out.writer.write_all(&msg).await?;
         }
         out.writer.flush().await?;
@@ -89,7 +89,7 @@ pub async fn make_outs(
                     use tokio::net::TcpStream;
                     let stream = TcpStream::connect(addr)
                         .await
-                        .map_err(|err| TwitchzeroError::TCPConnectError(err))?;
+                        .map_err(TwitchzeroError::TCPConnectError)?;
                     outs.push(AsyncOutput::new(Box::new(stream)));
                 } else if other_out.starts_with(UNIX_O) {
                     #[cfg(target_os = "linux")]
@@ -109,7 +109,7 @@ pub async fn make_outs(
                 } else {
                     let file = File::create(other_out)
                         .await
-                        .map_err(|err| TwitchzeroError::FileCreateError(err))?;
+                        .map_err(TwitchzeroError::FileCreateError)?;
                     outs.push(AsyncOutput::new(Box::new(file)));
                 }
             }

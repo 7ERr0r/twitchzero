@@ -14,8 +14,8 @@ pub fn sha3_str(text: &str) -> String {
     let mut hasher = Sha3_256::new();
     hasher.update(text.as_bytes());
     let result = hasher.finalize();
-    let hashname = hex::encode(result);
-    hashname
+    
+    hex::encode(result)
 }
 
 pub async fn recv_timeout<T>(

@@ -75,9 +75,9 @@ fn parse_m3u_meta(raw_meta: &[&str]) -> M3UParsedMeta {
 
     for m in raw_meta {
         if let Some(extinf) = m.strip_prefix("EXTINF:") {
-            let mut s = extinf.splitn(2, ",");
+            let mut s = extinf.splitn(2, ',');
             let duration_str = s.next();
-            duration = duration_str.map(|d| d.parse().ok()).flatten();
+            duration = duration_str.and_then(|d| d.parse().ok());
             title = s.next().map(|s| s.to_owned());
         }
     }
@@ -338,9 +338,9 @@ pub async fn reload_m3u8(
 #[allow(unused)]
 /// Creates file in /m3u8/ directory
 async fn debug_m3u(prefix: &str, text: &str) -> Result<(), anyhow::Error> {
-    let h = sha3_str(&text);
+    let h = sha3_str(text);
     let _ = stderr!("creating: {}.m3u8\n", h);
     let mut file = File::create(format!("m3u8/{}{}.m3u8", prefix, h)).await?;
-    file.write_all(&text.as_bytes()).await?;
+    file.write_all(text.as_bytes()).await?;
     Ok(())
 }

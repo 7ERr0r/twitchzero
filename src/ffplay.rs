@@ -60,7 +60,7 @@ async fn check_ffplay_exists() -> Result<FFplayLocation, anyhow::Error> {
             }
         }
     }
-    return Ok(FFplayLocation::NotFound);
+    Ok(FFplayLocation::NotFound)
 }
 
 async fn ensure_ffplay(client: &reqwest::Client) -> Result<FFplayLocation, anyhow::Error> {
@@ -116,7 +116,7 @@ pub async fn spawn_ffplay(
     ffplay_location: Rc<RefCell<FFplayLocation>>,
 ) -> Result<tokio::process::ChildStdin, anyhow::Error> {
     if *ffplay_location.borrow() == FFplayLocation::NotChecked {
-        *ffplay_location.borrow_mut() = ensure_ffplay(&client).await?;
+        *ffplay_location.borrow_mut() = ensure_ffplay(client).await?;
     }
 
     use std::process::Stdio;

@@ -11,7 +11,7 @@ pub async fn fetch_access_token_gql(
     client: &reqwest::Client,
     channel: &String,
 ) -> Result<TokenSig, anyhow::Error> {
-    let access_token_addr = format!("https://gql.twitch.tv/gql");
+    let access_token_addr = "https://gql.twitch.tv/gql".to_string();
     let token_sig = {
         let params = [("platform", "_")];
         let url = reqwest::Url::parse_with_params(&access_token_addr, &params)?;
@@ -55,11 +55,11 @@ pub async fn fetch_access_token_gql(
 
         let gql_resp: GQLTokenResponse = serde_json::from_slice(&bytes_vec)?;
 
-        let token_sig = TokenSig {
+        
+        TokenSig {
             token: gql_resp.data.streamPlaybackAccessToken.value,
             sig: gql_resp.data.streamPlaybackAccessToken.signature,
-        };
-        token_sig
+        }
     };
     Ok(token_sig)
 }
