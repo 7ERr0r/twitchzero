@@ -39,7 +39,7 @@ pub fn extract_segments(text: &str) -> Vec<M3USegment> {
         let this_url = extract_url_m3u(line);
 
         if this_url.is_none() {
-            if let Some(m) = line.strip_prefix("#") {
+            if let Some(m) = line.strip_prefix('#') {
                 segment_meta.push(m);
             }
         }
@@ -62,7 +62,7 @@ fn extract_url_m3u(line: &str) -> Option<(bool, &str)> {
     let prefetch_prefix = "#EXT-X-TWITCH-PREFETCH:";
     if let Some(prefetch) = line.strip_prefix(prefetch_prefix) {
         Some((true, prefetch))
-    } else if !line.starts_with("#") {
+    } else if !line.starts_with('#') {
         Some((false, line))
     } else {
         None
@@ -165,21 +165,21 @@ async fn fetch_segment(
 ) -> Result<(), anyhow::Error> {
     let tx = segment.tx.clone();
 
-    for _i in 0..2 {
-        let mut res = client.get(prefetch_url).send().await?;
-        {
-            while let Some(chunk) = res.chunk().await? {
-                let vec_rc = Rc::new((&chunk).to_vec());
+    // for _i in 0..2 {
+    let mut res = client.get(prefetch_url).send().await?;
+    {
+        while let Some(chunk) = res.chunk().await? {
+            let vec_rc = Rc::new(chunk.to_vec());
 
-                tx.send(SegmentBytes::More(vec_rc.clone()))
-                    .await
-                    .map_err(|_| TwitchzeroError::SegmentDataSendError)?;
+            tx.send(SegmentBytes::More(vec_rc.clone()))
+                .await
+                .map_err(|_| TwitchzeroError::SegmentDataSendError)?;
 
-                //stderr!(".")?;
-            }
-            break;
+            //stderr!(".")?;
         }
+        //break;
     }
+    // }
     tx.send(SegmentBytes::EOF)
         .await
         .map_err(|_| TwitchzeroError::SegmentDataSendError)?;
@@ -263,7 +263,7 @@ pub async fn m3u_fetch_segment<'a>(
 
     let (tx, rx) = mpsc::channel::<SegmentBytes>(512);
     let segment = Rc::new(Segment {
-        tx: tx,
+        tx,
         rx: RefCell::new(rx),
     });
     segments_tx

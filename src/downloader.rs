@@ -73,11 +73,11 @@ async fn reload_loop(
 pub async fn ordered_download(
     client: reqwest::Client,
     mut out_names: Vec<&str>,
-    copy_ended: Rc<RefCell<bool>>,
     m3u8playlist_url: String,
     channel: &str,
     ffplay_location: Rc<RefCell<FFplayLocation>>,
 ) -> Result<(), anyhow::Error> {
+    let copy_ended = Rc::new(RefCell::new(false));
     let outs = make_outs(
         &client,
         &mut out_names,

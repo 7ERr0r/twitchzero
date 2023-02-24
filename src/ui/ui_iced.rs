@@ -5,7 +5,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Length, Sandbox, Settings};
 
-pub fn main() -> iced::Result {
+pub fn ui_main() -> iced::Result {
     Styling::run(Settings::default())
 }
 

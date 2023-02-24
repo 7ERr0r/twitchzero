@@ -6,9 +6,8 @@ Fetches m3u8 URL and joins the segments to the stdout at realtime.
 Resistant to connection (eg. wifi) loss.
 
 Features:
-- No `Arc`
-- Excessive debug
-- ffplay windows on Windows
+- twitch GQL m3u live extraction
+- ffplay windows with preconfigured low latency
 
 Build
 ====

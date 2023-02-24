@@ -18,7 +18,8 @@ pub async fn fetch_access_token_gql(
 
         let is_live = true;
         let login = if is_live { channel } else { "" };
-        let vod_id = if is_live { "" } else { "" };
+        //let vod_id = if is_live { "" } else { "" };
+        let vod_id = "";
         let json_map = serde_json::json!({
             "operationName": "PlaybackAccessToken",
             "extensions": {
