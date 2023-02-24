@@ -55,7 +55,6 @@ pub async fn fetch_access_token_gql(
 
         let gql_resp: GQLTokenResponse = serde_json::from_slice(&bytes_vec)?;
 
-        
         TokenSig {
             token: gql_resp.data.streamPlaybackAccessToken.value,
             sig: gql_resp.data.streamPlaybackAccessToken.signature,

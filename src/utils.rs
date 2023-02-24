@@ -14,7 +14,7 @@ pub fn sha3_str(text: &str) -> String {
     let mut hasher = Sha3_256::new();
     hasher.update(text.as_bytes());
     let result = hasher.finalize();
-    
+
     hex::encode(result)
 }
 

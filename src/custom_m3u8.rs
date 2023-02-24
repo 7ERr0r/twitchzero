@@ -274,11 +274,8 @@ pub async fn m3u_fetch_segment<'a>(
     let segment_url = m3u_segment.url.to_string();
     tokio::task::spawn_local(async move {
         let res = fetch_segment(cclient, &segment_url, segment.clone()).await;
-        match res {
-            Err(err) => {
-                let _ = stderr!("fetch_segment err: {}", err);
-            }
-            _ => {}
+        if let Err(err) = res {
+            let _ = stderr!("fetch_segment err: {}", err);
         }
         let _ = ctxwake.send(true).await;
     });
