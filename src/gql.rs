@@ -5,6 +5,8 @@ use crate::{
     stderr,
 };
 
+/// Streamlink:
+/// https://github.com/streamlink/streamlink/blob/e2e41987ae4a9026c3866943d24cd87ef4652e7b/src/streamlink/plugins/twitch.py#L664
 pub async fn fetch_access_token_gql(
     client: &reqwest::Client,
     channel: &String,

@@ -1,3 +1,5 @@
+use tokio::{sync::mpsc::Receiver, time::timeout};
+
 #[macro_export]
 macro_rules! stderr {
     () => (io::stderr().write_all(&[0; 0]).await);
@@ -14,4 +16,11 @@ pub fn sha3_str(text: &str) -> String {
     let result = hasher.finalize();
     let hashname = hex::encode(result);
     hashname
+}
+
+pub async fn recv_timeout<T>(
+    rx: &mut Receiver<T>,
+    sleep_duration: std::time::Duration,
+) -> Result<Option<T>, ()> {
+    timeout(sleep_duration, rx.recv()).await.map_err(|_| ())
 }
