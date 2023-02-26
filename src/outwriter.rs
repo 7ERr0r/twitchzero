@@ -97,7 +97,7 @@ pub async fn make_outs(
 
                         let stream = UnixStream::connect(addr)
                             .await
-                            .map_err(|err| TwitchzeroError::UnixConnectError(err))?;
+                            .map_err(|err| TwitchzeroError::UnixConnect(err))?;
                         outs.push(Box::new(stream));
                     }
                     #[cfg(not(target_os = "linux"))]

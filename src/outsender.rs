@@ -13,6 +13,7 @@ pub struct OutputStreamSender {
     pub tx: Sender<Rc<Vec<u8>>>,
 }
 
+#[allow(clippy::await_holding_refcell_ref)]
 /// copies
 /// from: Segment-s in segments_rx
 ///   to: channels of Vec<u8> in txbufs
