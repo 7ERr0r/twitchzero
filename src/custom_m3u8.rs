@@ -104,7 +104,7 @@ fn make_url_query(
     q.append_pair("fast_bread", "true");
 }
 
-pub async fn fetch_m3u8_by_channel(
+pub async fn fetch_playlist_url_by_channel(
     client: &reqwest::Client,
     channel: String,
 ) -> Result<String, anyhow::Error> {
@@ -145,7 +145,7 @@ pub async fn fetch_m3u8_by_channel(
 }
 
 pub enum SegmentBytes {
-    EOF,
+    Eof,
     More(Rc<Vec<u8>>),
 }
 
@@ -173,16 +173,16 @@ async fn fetch_segment(
 
             tx.send(SegmentBytes::More(vec_rc.clone()))
                 .await
-                .map_err(|_| TwitchzeroError::SegmentDataSendError)?;
+                .map_err(|_| TwitchzeroError::SegmentDataSend)?;
 
             //stderr!(".")?;
         }
         //break;
     }
     // }
-    tx.send(SegmentBytes::EOF)
+    tx.send(SegmentBytes::Eof)
         .await
-        .map_err(|_| TwitchzeroError::SegmentDataSendError)?;
+        .map_err(|_| TwitchzeroError::SegmentDataSend)?;
     drop(tx);
 
     Ok(())
@@ -269,7 +269,7 @@ pub async fn m3u_fetch_segment<'a>(
     segments_tx
         .send(segment.clone())
         .await
-        .map_err(|_| TwitchzeroError::SegmentSendError)?;
+        .map_err(|_| TwitchzeroError::SegmentSend)?;
 
     let segment_url = m3u_segment.url.to_string();
     tokio::task::spawn_local(async move {
@@ -315,9 +315,10 @@ pub async fn reload_m3u8(
         check_ad_start_end(segment, &mut is_ad_range).await;
 
         let furl = segment.url.to_string();
-        if !used_segments.contains_key(&furl) {
-            used_segments.insert(furl.to_string(), epoch_number);
-
+        if used_segments
+            .insert(furl.to_string(), epoch_number)
+            .is_none()
+        {
             m3u_fetch_segment(&client, &segments_tx, &txwake, is_ad_range, segment).await?;
         } else {
             //stderr!("reload_m3u8: duplicate segment, not fetching\n")?;

@@ -84,17 +84,15 @@ pub async fn make_outs(
             other_out => {
                 const TCP_O: &str = "tcp:";
                 const UNIX_O: &str = "unix:";
-                if other_out.starts_with(TCP_O) {
-                    let addr = &other_out[TCP_O.len()..];
+                if let Some(addr) = other_out.strip_prefix(TCP_O) {
                     use tokio::net::TcpStream;
                     let stream = TcpStream::connect(addr)
                         .await
-                        .map_err(TwitchzeroError::TCPConnectError)?;
+                        .map_err(TwitchzeroError::TCPConnect)?;
                     outs.push(AsyncOutput::new(Box::new(stream)));
-                } else if other_out.starts_with(UNIX_O) {
+                } else if let Some(addr) = other_out.strip_prefix(UNIX_O) {
                     #[cfg(target_os = "linux")]
                     {
-                        let addr = &other_out[UNIX_O.len()..];
                         use tokio::net::UnixStream;
 
                         let stream = UnixStream::connect(addr)
@@ -104,12 +102,13 @@ pub async fn make_outs(
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
-                        return Err(TwitchzeroError::NoUnixSocketError.into());
+                        let _ = addr;
+                        return Err(TwitchzeroError::NoUnixSocket.into());
                     }
                 } else {
                     let file = File::create(other_out)
                         .await
-                        .map_err(TwitchzeroError::FileCreateError)?;
+                        .map_err(TwitchzeroError::FileCreate)?;
                     outs.push(AsyncOutput::new(Box::new(file)));
                 }
             }
@@ -167,11 +166,8 @@ pub fn make_out_writers(
         let end_on_broken_pipe = out.end_on_broken_pipe;
         tokio::task::spawn_local(async move {
             let res = copy_channel_to_out(rxbuf, &mut out).await;
-            match res {
-                Err(err) => {
-                    let _ = stderr!("copy_channel_to_out err: {}\n", err);
-                }
-                Ok(_) => {}
+            if let Err(err) = res {
+                let _ = stderr!("copy_channel_to_out err: {}\n", err);
             }
 
             if end_on_broken_pipe {

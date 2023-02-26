@@ -3,25 +3,25 @@ pub enum TwitchzeroError {
     // #[display(fmt = "file ffplay.exe is not a file")]
     // FileIsNotFFplay,
     #[display(fmt = "TCPConnectError: {}", _0)]
-    TCPConnectError(std::io::Error),
+    TCPConnect(std::io::Error),
 
     #[cfg(target_os = "linux")]
     #[display(fmt = "UnixConnectError: {}", _0)]
-    UnixConnectError(std::io::Error),
+    UnixConnect(std::io::Error),
 
     #[display(fmt = "FileCreateError: {}", _0)]
-    FileCreateError(std::io::Error),
+    FileCreate(std::io::Error),
 
     #[display(fmt = "NoUnixSocketError: target_os != linux")]
-    NoUnixSocketError,
+    NoUnixSocket,
 
     #[display(fmt = "SegmentDataSendError: can't send")]
-    SegmentDataSendError,
+    SegmentDataSend,
 
     #[display(fmt = "SegmentSendError")]
-    SegmentSendError,
+    SegmentSend,
 
     #[display(fmt = "SegmentJoinSendError")]
-    SegmentJoinSendError,
+    SegmentJoinSend,
 }
 impl std::error::Error for TwitchzeroError {}

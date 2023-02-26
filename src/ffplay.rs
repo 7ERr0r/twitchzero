@@ -139,7 +139,7 @@ pub async fn spawn_ffplay(
             .arg("-vn")
             .arg("-framedrop")
             .arg("-af")
-            .arg("volume=0.4,atempo=1.02")
+            .arg("volume=0.4,atempo=1.05")
             .arg("-strict")
             .arg("experimental")
             .arg("-x")

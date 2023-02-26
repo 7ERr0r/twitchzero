@@ -18,7 +18,7 @@ pub struct OutputStreamSender {
 ///   to: channels of Vec<u8> in txbufs
 pub async fn join_one_segment(
     segments_rx: &mut Receiver<Rc<Segment>>,
-    txbufs: &mut Vec<OutputStreamSender>,
+    txbufs: &mut [OutputStreamSender],
 ) -> Result<(), anyhow::Error> {
     let res = segments_rx.recv().await;
     match res {
@@ -32,7 +32,7 @@ pub async fn join_one_segment(
                 let out_segment_bytes = rx.recv().await;
 
                 match out_segment_bytes {
-                    Some(SegmentBytes::EOF) => {
+                    Some(SegmentBytes::Eof) => {
                         break;
                     }
                     Some(SegmentBytes::More(bytes)) => {
@@ -42,7 +42,7 @@ pub async fn join_one_segment(
                                 out.tx
                                     .send(bytes.clone())
                                     .await
-                                    .map_err(|_| TwitchzeroError::SegmentJoinSendError)?;
+                                    .map_err(|_| TwitchzeroError::SegmentJoinSend)?;
                             } else {
                                 // non-blocking
                                 let _r = out.tx.try_send(bytes.clone());

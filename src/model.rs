@@ -22,3 +22,8 @@ pub struct GQLTokenResponseData {
 pub struct GQLTokenResponse {
     pub data: GQLTokenResponseData,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct GQLAnyResponse<D> {
+    pub data: Box<D>,
+}

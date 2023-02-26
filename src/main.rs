@@ -17,7 +17,7 @@ use crate::tzerror::TwitchzeroError;
 
 use args::TwitchzeroArgs;
 use clap::Parser;
-use custom_m3u8::fetch_m3u8_by_channel;
+use custom_m3u8::fetch_playlist_url_by_channel;
 use downloader::ordered_download;
 use ffplay::FFplayLocation;
 use std::cell::RefCell;
@@ -72,7 +72,7 @@ async fn twitchzero_cli(args: &TwitchzeroArgs) -> Result<(), anyhow::Error> {
     let m3u8playlist_url = if let Some(playlist) = &args.playlist_m3u8 {
         playlist.clone()
     } else {
-        fetch_m3u8_by_channel(&client, args.channel.to_string()).await?
+        fetch_playlist_url_by_channel(&client, args.channel.to_string()).await?
     };
 
     stderr!("url: {:?}\n", m3u8playlist_url)?;
