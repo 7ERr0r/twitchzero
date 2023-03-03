@@ -19,5 +19,10 @@ pub struct TwitchzeroArgs {
     pub playlist_m3u8: Option<String>,
 
     /// Twitch channel url
+    #[arg(short, long)]
     pub channel: String,
+
+    /// Device id, use to skip ads. Eg. 'BfBaSCFCjexFMAnzcMcRtDVJUay6bDof'
+    #[arg(short, long)]
+    pub device_id: Option<String>,
 }

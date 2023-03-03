@@ -106,9 +106,10 @@ fn make_url_query(
 
 pub async fn fetch_playlist_url_by_channel(
     client: &reqwest::Client,
-    channel: String,
+    channel: &str,
+    device_id: Option<&str>,
 ) -> Result<String, anyhow::Error> {
-    let token_sig = fetch_access_token_gql(client, &channel).await?;
+    let token_sig = fetch_access_token_gql(client, channel, device_id).await?;
 
     let channel_addr = format!("https://usher.ttvnw.net/api/channel/hls/{}.m3u8", channel);
     let playlist_url = {
@@ -124,13 +125,13 @@ pub async fn fetch_playlist_url_by_channel(
         h.insert(ORIGIN, "https://player.twitch.tv".parse()?);
 
         let res = client.execute(req).await?;
-        stderr!("channel: Status: {}\n", res.status())?;
+        stderr!("fetch_playlist_url_by_channel: Status: {}\n", res.status())?;
 
         let text = res.text().await?;
 
         //debug_m3u(&text).await?;
 
-        stderr!("channel: {}\n", &text)?;
+        //stderr!("fetch_playlist_url_by_channel: {}\n", &text)?;
 
         let segments_vec = extract_segments(&text);
 
@@ -189,17 +190,17 @@ async fn fetch_segment(
 }
 
 pub fn is_segment_ad_start(segment: &M3USegment) -> bool {
-    let mut is_discontinuity = false;
+    // let mut is_discontinuity = false;
     let mut contains_ad_meta = false;
     for &m in &segment.meta {
         if m.contains("X-TV-TWITCH-AD") {
             contains_ad_meta = true;
         }
-        if m == "EXT-X-DISCONTINUITY" {
-            is_discontinuity = true;
-        }
+        // if m == "EXT-X-DISCONTINUITY" {
+        //     is_discontinuity = true;
+        // }
     }
-    is_discontinuity && contains_ad_meta
+    contains_ad_meta
 }
 pub fn is_segment_ad_end(segment: &M3USegment) -> bool {
     let mut is_discontinuity = false;

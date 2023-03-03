@@ -72,7 +72,7 @@ async fn twitchzero_cli(args: &TwitchzeroArgs) -> Result<(), anyhow::Error> {
     let m3u8playlist_url = if let Some(playlist) = &args.playlist_m3u8 {
         playlist.clone()
     } else {
-        fetch_playlist_url_by_channel(&client, args.channel.to_string()).await?
+        fetch_playlist_url_by_channel(&client, &args.channel, args.device_id.as_deref()).await?
     };
 
     stderr!("url: {:?}\n", m3u8playlist_url)?;
